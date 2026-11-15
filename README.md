@@ -29,10 +29,10 @@ Actions fetches the engine, applies the overlay, and builds the APK.
 The APK is debug-signed, so you may need to allow "install unknown apps" for your browser or file
 manager.
 
-**Updating.** From build 36 on every build is signed with the same key (`signing/debug.keystore`), so a
+**Updating.** Every build after build 35 is signed with the same key (`signing/debug.keystore`), so a
 newer APK installs over the older one and keeps everything inside the container (apps, Google services,
-sign-ins). Builds 35 and older were each signed with a new random key; going from one of those to
-build 36 needs one uninstall first, which erases the container once. The key is a plain debug key and,
+sign-ins). Builds 35 and older were each signed with a new random key; going from one of those to a
+newer build needs one uninstall first, which erases the container once. The key is a plain debug key and,
 because this repository is public, so is the key. If you want it private, make your own keystore
 (alias `androiddebugkey`, store and key password `android`), save it as a repository secret named
 `DEBUG_KEYSTORE_B64` (base64 of the file), and the workflow uses that instead. Every build is checked at
@@ -155,7 +155,7 @@ Three more fixes went in after the button was reported to do nothing:
 The log (tag `BlackBoxAccounts`) now shows each step: sign-in service found, connected, asked,
 answered (entry names only), screen opened, or the error.
 
-**The Play Store record (build 36).** Google's own client code, which is inside every app that uses
+**The Play Store record (builds after 35).** Google's own client code, which is inside every app that uses
 Play services, checks that the Play Store on the phone is the genuine one: it compares its signing
 certificate with Google's (log: `requires Google Play Store, but its signature is invalid`). The engine
 answered every question about the Play Store (`com.android.vending`) with a record it made up, which
@@ -234,7 +234,7 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/Bcore/src/main/java/.../core/env/ExternalFolders.java` | Creates the folders an app expects on "phone storage" inside the container before it starts |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalVolumes.java` | Points the storage volumes Android reports to an app at the container's own folder |
 | `overlay/Bcore/src/main/java/.../core/system/os/BStorageManagerService.java` | The container's storage service (copy of the engine's file without the check that failed outside user 0) |
-| `signing/debug.keystore` | The fixed debug signing key, so updates install over older builds |
+| `signing/debug.keystore` | The fixed debug signing key, so updates install over older builds (`apply_overlay.py` copies it into the app module and names it in the app's signing config) |
 | `overlay/app/src/main/java/.../view/gms/` | GMS Manager list with the Sign in button (copies of the engine's two files, changed) |
 | `overlay/app/src/main/java/.../runner/DebugReport.java` | Pieces of the debug report: process exit reasons, saved crash reports, apps and files inside the container |
 | `overlay/app/src/main/java/.../runner/Tombstone.java` | Reads the native crash record Android keeps for a process (signal, call stack, last log lines) |

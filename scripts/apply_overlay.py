@@ -813,6 +813,49 @@ def patch_native_module(engine: Path) -> None:
     print("registered the bgmute native module")
 
 
+# Every build is signed with the same key. A debug build otherwise gets a new random key on every
+# fresh machine, so each update had to be installed after an uninstall, which erased everything inside
+# the container. The first attempt (putting the key at ~/.android/debug.keystore) was ignored by
+# Gradle, so the key file is now named explicitly in the app module's signing config.
+SIGNING_KEYSTORE_NAME = "fixed-debug.keystore"
+SIGNING_ANCHOR = """    buildTypes {
+        release {
+            signingConfig signingConfigs.debug
+"""
+SIGNING_BLOCK = f"""    // BG App Runner: sign every build with the same key (see signing/ in the overlay repository).
+    signingConfigs {{
+        debug {{
+            storeFile file("{SIGNING_KEYSTORE_NAME}")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+        }}
+    }}
+
+"""
+
+
+def patch_signing(engine: Path, repo: Path) -> None:
+    gradle = engine / "app/build.gradle"
+    if not gradle.is_file():
+        fail(f"{gradle} not found; the engine layout changed")
+    keystore = repo / "signing" / "debug.keystore"
+    if not keystore.is_file():
+        fail(f"{keystore} not found")
+    # Always (re)place the key file; the workflow may later replace it with the owner's own key.
+    shutil.copyfile(keystore, engine / "app" / SIGNING_KEYSTORE_NAME)
+    text = gradle.read_text(encoding="utf-8")
+    if SIGNING_KEYSTORE_NAME in text:
+        print("fixed signing key already set up, skipping")
+        return
+    found = text.count(SIGNING_ANCHOR)
+    if found != 1:
+        fail(f"app/build.gradle: expected 1 match of the signing anchor, found {found}; "
+             "the engine changed, so pin an older engine_ref or update scripts/apply_overlay.py")
+    gradle.write_text(text.replace(SIGNING_ANCHOR, SIGNING_BLOCK + SIGNING_ANCHOR, 1), encoding="utf-8")
+    print("signing every build with signing/debug.keystore")
+
+
 def patch_keep_alive(engine: Path) -> None:
     root = engine / ENGINE_ROOT
     marker = root / "fake/service/HCallbackProxy.java"
@@ -885,6 +928,7 @@ def main() -> None:
     patch_engine(engine)
     patch_keep_alive(engine)
     patch_native_module(engine)
+    patch_signing(engine, repo)
 
     text = manifest.read_text(encoding="utf-8")
     if "runner.RunnerActivity" in text:
