@@ -29,6 +29,15 @@ Actions fetches the engine, applies the overlay, and builds the APK.
 The APK is debug-signed, so you may need to allow "install unknown apps" for your browser or file
 manager.
 
+**Updating.** From build 36 on every build is signed with the same key (`signing/debug.keystore`), so a
+newer APK installs over the older one and keeps everything inside the container (apps, Google services,
+sign-ins). Builds 35 and older were each signed with a new random key; going from one of those to
+build 36 needs one uninstall first, which erases the container once. The key is a plain debug key and,
+because this repository is public, so is the key. If you want it private, make your own keystore
+(alias `androiddebugkey`, store and key password `android`), save it as a repository secret named
+`DEBUG_KEYSTORE_B64` (base64 of the file), and the workflow uses that instead. Every build is checked at
+the end of the workflow against the key it should carry.
+
 ## Use it
 
 **Look:** calm liquid glass. A deep blue backdrop with soft lights that drift, swell and slowly change
@@ -146,6 +155,14 @@ Three more fixes went in after the button was reported to do nothing:
 The log (tag `BlackBoxAccounts`) now shows each step: sign-in service found, connected, asked,
 answered (entry names only), screen opened, or the error.
 
+**The Play Store record (build 36).** Google's own client code, which is inside every app that uses
+Play services, checks that the Play Store on the phone is the genuine one: it compares its signing
+certificate with Google's (log: `requires Google Play Store, but its signature is invalid`). The engine
+answered every question about the Play Store (`com.android.vending`) with a record it made up, which
+carried no signature, so that check always failed. It now answers with the real record: the copy
+installed in that space if there is one, otherwise the phone's own. This is also what Instagram's
+"signature is invalid" message came from.
+
 ## If apps still stop
 
 Phone battery managers can be aggressive. Try these first: **Autostart in background** and
@@ -185,10 +202,19 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
   may refuse to run or crash.
 - The container keeps its own copy of the phone's storage (`Android/data`, `Download`, ...). The
   folders an app expects there (its own `Android/data/<app>/files`, `Android/obb/<app>`, `Download`,
-  `DCIM`, ...) are now created before it starts; they used to be missing, and a game that wrote its
-  first file there without checking (GTA San Andreas, right after its loading bar) crashed.
+  `DCIM`, ...) are created before it starts.
   Files the real app saved on the phone, such as downloaded game data, are not visible inside the
   container, so a game that needs them has to download them again in there.
+- **GTA San Andreas closing right after its loading bar** was not (only) the missing folders. The
+  crash was in the game's own file code (`OS_FileWrite`, null file handle) because the game had been
+  given the phone's real folder `/storage/emulated/10/Android/data/com.rockstargames.gtasa/files`,
+  which Android does not let it write to, instead of the container's. An app learns its folders from
+  Android's list of storage volumes, and the container swaps that list for its own folder. The swap
+  started with a check "ask for user 0's volumes", which Android refuses when the app runs in any other
+  user (here user 10), so the swap was skipped. `BStorageManagerService` now asks for the user the app
+  really runs in, and the app process repeats the swap itself (`ExternalVolumes`) if the container's
+  service gives no answer. The log line `ExternalVolumes: storage volumes now point at the container
+  folder` (once per app start) shows that it happened.
 - The engine says it supports Android 5 to 14+. Newer versions may have problems. If the build
   breaks after the engine changes, pin it: run the workflow manually and set `engine_ref` to a
   commit that worked.
@@ -206,6 +232,9 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/Bcore/src/main/java/.../fake/service/ICredentialManagerProxy.java` | Answers Android's Credential Manager (Sign in with Google picker, passkeys) with "no saved logins" inside the container; without it Android refuses with a SecurityException and Instagram closes ~10 s after it starts |
 | `overlay/Bcore/src/main/java/.../fake/frameworks/GoogleSignIn.java` | Starts "add a Google account" for one space and opens Google's sign-in screen in the container |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalFolders.java` | Creates the folders an app expects on "phone storage" inside the container before it starts |
+| `overlay/Bcore/src/main/java/.../core/env/ExternalVolumes.java` | Points the storage volumes Android reports to an app at the container's own folder |
+| `overlay/Bcore/src/main/java/.../core/system/os/BStorageManagerService.java` | The container's storage service (copy of the engine's file without the check that failed outside user 0) |
+| `signing/debug.keystore` | The fixed debug signing key, so updates install over older builds |
 | `overlay/app/src/main/java/.../view/gms/` | GMS Manager list with the Sign in button (copies of the engine's two files, changed) |
 | `overlay/app/src/main/java/.../runner/DebugReport.java` | Pieces of the debug report: process exit reasons, saved crash reports, apps and files inside the container |
 | `overlay/app/src/main/java/.../runner/Tombstone.java` | Reads the native crash record Android keeps for a process (signal, call stack, last log lines) |

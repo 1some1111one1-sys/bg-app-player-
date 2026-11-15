@@ -721,6 +721,66 @@ KEEP_PATCHES = [
 """,
         1,
     ),
+    (
+        # Google Play services only accepts an app when the Play Store it finds carries Google's
+        # signing certificate (log line: "requires Google Play Store, but its signature is invalid").
+        # The engine answered every question about the Play Store with a made-up record that has no
+        # signature at all, so Google sign-in, Instagram and every app that uses Play services were
+        # refused. Hand out a real record instead: the copy installed in this space, or else the
+        # phone's own.
+        "fake/service/IPackageManagerProxy.java",
+        """            if ("com.android.vending".equals(packageName)) {
+                return createFakeGooglePlayServicesPackageInfo();
+            }""",
+        """            if ("com.android.vending".equals(packageName)) {
+                PackageInfo playStore = BlackBoxCore.getBPackageManager().getPackageInfo(packageName, flags, BlackBoxCore.getUserId());
+                if (playStore != null) {
+                    return playStore;
+                }
+                return method.invoke(who, args);
+            }""",
+        1,
+    ),
+    (
+        # GTA San Andreas still crashed right after loading. The paths an app uses on "phone storage"
+        # come from Android's list of storage volumes, which the container rewrites to point at its
+        # own folder. On a phone where BG App Runner is not on the first user (user 10, Second space)
+        # that rewrite never happened (see BStorageManagerService), so the game was given the phone's
+        # real, protected folder, which its native code cannot write to. If the container's service
+        # cannot answer for any reason, ask Android here and rewrite the answer in this process.
+        "fake/service/IStorageManagerProxy.java",
+        """                StorageVolume[] volumeList = BlackBoxCore.getBStorageManager().getVolumeList(BActivityThread.getBUid(), null, 0, BActivityThread.getUserId());
+                if (volumeList == null) {
+                    return method.invoke(who, args);
+                }
+                return volumeList;""",
+        """                StorageVolume[] volumeList = BlackBoxCore.getBStorageManager().getVolumeList(BActivityThread.getBUid(), null, 0, BActivityThread.getUserId());
+                if (volumeList == null || volumeList.length == 0) {
+                    return top.niunaijun.blackbox.core.env.ExternalVolumes.redirect(method.invoke(who, args), BActivityThread.getUserId());
+                }
+                return volumeList;""",
+        1,
+    ),
+    (
+        "fake/service/IStorageManagerProxy.java",
+        """                StorageVolume[] volumeList = BlackBoxCore.getBStorageManager().getVolumeList(uid, packageName, flags, BActivityThread.getUserId());
+                if (volumeList == null) {
+                    return method.invoke(who, args);
+                }
+                return volumeList;
+            } catch (Throwable t) {
+                return method.invoke(who, args);
+            }""",
+        """                StorageVolume[] volumeList = BlackBoxCore.getBStorageManager().getVolumeList(uid, packageName, flags, BActivityThread.getUserId());
+                if (volumeList == null || volumeList.length == 0) {
+                    return top.niunaijun.blackbox.core.env.ExternalVolumes.redirect(method.invoke(who, args), BActivityThread.getUserId());
+                }
+                return volumeList;
+            } catch (Throwable t) {
+                return top.niunaijun.blackbox.core.env.ExternalVolumes.redirect(method.invoke(who, args), BActivityThread.getUserId());
+            }""",
+        1,
+    ),
 ]
 
 

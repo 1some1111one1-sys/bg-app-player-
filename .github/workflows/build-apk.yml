@@ -51,6 +51,26 @@ jobs:
       - name: Apply overlay
         run: python3 scripts/apply_overlay.py engine
 
+      - name: Use a fixed signing key
+        env:
+          # Optional: a base64 copy of your own keystore (alias androiddebugkey, password android).
+          # When this secret exists it is used instead of signing/debug.keystore.
+          KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+        run: |
+          # Android installs an update over an installed app only when both are signed with the same
+          # key. A debug build normally gets a fresh random key on every run, so each update had to
+          # be installed after an uninstall, which also erased everything inside the container.
+          KEYDIR="${ANDROID_USER_HOME:-$HOME/.android}"
+          mkdir -p "$KEYDIR"
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$KEYDIR/debug.keystore"
+            echo "Signing with the key from the DEBUG_KEYSTORE_B64 secret"
+          else
+            cp signing/debug.keystore "$KEYDIR/debug.keystore"
+            echo "Signing with signing/debug.keystore from this repository"
+          fi
+          echo "DEBUG_KEYSTORE=$KEYDIR/debug.keystore" >> "$GITHUB_ENV"
+
       - name: Build debug APKs
         working-directory: engine
         run: |
@@ -62,6 +82,23 @@ jobs:
           mkdir -p out
           find engine/app/build/outputs/apk/debug -name "*.apk" -exec cp {} out/ \;
           ls -la out
+
+      - name: Check the APKs are signed with the fixed key
+        run: |
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          WANT=$(keytool -list -v -keystore "$DEBUG_KEYSTORE" -storepass android -alias androiddebugkey 2>/dev/null \
+            | sed -n 's/^[[:space:]]*SHA256:[[:space:]]*//p' | head -1 | tr -d ':' | tr 'A-F' 'a-f')
+          if [ -z "$WANT" ]; then echo "::error::could not read the signing key"; exit 1; fi
+          echo "expected signer: $WANT"
+          for apk in out/*.apk; do
+            GOT=$("$APKSIGNER" verify --print-certs "$apk" \
+              | sed -n 's/^Signer #1 certificate SHA-256 digest:[[:space:]]*//p' | head -1)
+            echo "$(basename "$apk") is signed by $GOT"
+            if [ "$GOT" != "$WANT" ]; then
+              echo "::error::$(basename "$apk") is not signed with the fixed key"
+              exit 1
+            fi
+          done
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
