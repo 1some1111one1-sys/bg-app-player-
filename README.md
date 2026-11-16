@@ -146,14 +146,36 @@ Three more fixes went in after the button was reported to do nothing:
 - The screen Google returns was opened through the app's splash screen, which quits silently when
   the intent names no package (Google names its screen by class only). The button now starts it
   directly, checks first that the screen exists in that space, and says so if it does not.
-- If Google Play services give no first answer within 30 seconds, the button now says so instead
-  of waiting forever.
+- If Google Play services give no first answer, the button no longer waits forever (see "The
+  sign-in box" below for what it does now).
 - The account service treated an account with no per-app visibility as hidden from every app, so
   the lookups that filter by visibility (the ones Google services and sign-in pickers use) found
   no accounts even after a successful sign-in. Such an account is now visible, as on Android.
 
 The log (tag `BlackBoxAccounts`) now shows each step: sign-in service found, connected, asked,
 answered (entry names only), screen opened, or the error.
+
+**The sign-in box (build 38).** Sign in used to show one line, "Opening Google sign-in...", and then
+nothing at all when Google Play services never answered, so there was no way to tell where it
+stopped. Tapping Sign in now opens a box with the live step and the seconds counted ("Starting
+Google Play services...", "Waiting for Google's sign-in screen..."), and a Cancel button. The step
+comes from the container's own `BlackBoxAccounts` log lines, so it follows what the account service
+really did. The engine now also keeps the reason a connection to Google's sign-in service failed (no
+sign-in service in that space, Android refused, Android declined) instead of the one word "bind
+failure", and logs when the service is still not connected after 15 seconds.
+
+- If it stops, the box says which step it stopped at and shows a report you can copy (button
+  **Copy details**): phone and Android version, the Google Play services version in that space,
+  whether Play Store is there, the steps with their times, the container's sign-in log lines, and the
+  last three crashes logged inside the container. The report holds no account name.
+- After 25 seconds without an answer, or at once when Google's service reports a problem, the app
+  also tries to open one of Google Play services' own sign-in screens directly (it looks the screen
+  up in that space; which sign-in screens exist is written into the report), and watches for the new
+  account. If Google's service answers late, its screen is opened as well.
+- Once a sign-in screen is open the box says so and offers **Show report**, for the case where the
+  screen never appears or closes at once.
+- It gives up after 60 seconds. The GitHub build numbers can skip a number, because a failed run
+  also uses one.
 
 **The Play Store record (builds after 35).** Google's own client code, which is inside every app that uses
 Play services, checks that the Play Store on the phone is the genuine one: it compares its signing
@@ -230,7 +252,8 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/app/src/main/java/.../view/base/BaseActivity.kt` | Puts the live backdrop behind every manager screen |
 | `overlay/app/src/main/res/` | Colours, theme and layouts that restyle the BlackBox manager screens |
 | `overlay/Bcore/src/main/java/.../fake/service/ICredentialManagerProxy.java` | Answers Android's Credential Manager (Sign in with Google picker, passkeys) with "no saved logins" inside the container; without it Android refuses with a SecurityException and Instagram closes ~10 s after it starts |
-| `overlay/Bcore/src/main/java/.../fake/frameworks/GoogleSignIn.java` | Starts "add a Google account" for one space and opens Google's sign-in screen in the container |
+| `overlay/Bcore/src/main/java/.../fake/frameworks/GoogleSignIn.java` | Starts "add a Google account" for one space, opens Google's sign-in screen in the container, follows the steps in the log, tries the direct way and builds the report |
+| `overlay/app/src/main/java/.../view/gms/GoogleSignInDialogs.java` | The boxes around a sign-in: progress, "screen is open", and the reason with a report to copy |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalFolders.java` | Creates the folders an app expects on "phone storage" inside the container before it starts |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalVolumes.java` | Points the storage volumes Android reports to an app at the container's own folder |
 | `overlay/Bcore/src/main/java/.../core/system/os/BStorageManagerService.java` | The container's storage service (copy of the engine's file without the check that failed outside user 0) |

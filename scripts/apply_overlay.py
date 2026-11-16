@@ -295,18 +295,54 @@ KEEP_PATCHES = [
     (
         # If Android still refuses to connect to the sign-in service (for example Google services
         # are installed in another space), tell the app that sign-in failed instead of letting the
-        # exception travel back and close it.
+        # exception travel back and close it. The reason is kept (mBindProblem) so the sign-in box can
+        # name it, and a connection that is slow to start is logged after 15 s.
         "core/system/accounts/BAccountManagerService.java",
-        """            if (!mContext.bindService(intent, this, flags)) {""",
+        """            if (!mContext.bindService(intent, this, flags)) {
+                if (Log.isLoggable(TAG, Log.VERBOSE)) {
+                    Log.v(TAG, "bindService to " + componentName + " failed");
+                }
+                return false;
+            }
+
+            return true;""",
         """            boolean bound = false;
             try {
                 bound = mContext.bindService(intent, this, flags);
             } catch (SecurityException e) {
+                mBindProblem = "Android refused the connection to " + componentName.flattenToShortString()
+                        + ": " + e.getMessage();
                 Log.e("BlackBoxAccounts", "cannot connect to " + componentName.flattenToShortString()
                         + " for space " + mAccounts.userId
                         + " (is Google Play services installed in this space?): " + e.getMessage());
             }
-            if (!bound) {""",
+            if (!bound) {
+                if (mBindProblem == null) {
+                    mBindProblem = "Android would not start " + componentName.flattenToShortString()
+                            + " (it declined the connection)";
+                }
+                Log.w("BlackBoxAccounts", "bindService to " + componentName.flattenToShortString()
+                        + " returned false (space " + mAccounts.userId + ")");
+                if (Log.isLoggable(TAG, Log.VERBOSE)) {
+                    Log.v(TAG, "bindService to " + componentName + " failed");
+                }
+                return false;
+            }
+
+            Log.i("BlackBoxAccounts", "waiting for " + componentName.flattenToShortString()
+                    + " to start (space " + mAccounts.userId + ")");
+            final String waitingFor = componentName.flattenToShortString();
+            mHandler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (mAuthenticator == null && mResponse != null) {
+                        Log.w("BlackBoxAccounts", "still not connected to " + waitingFor
+                                + " after 15 s (space " + mAccounts.userId + ")");
+                    }
+                }
+            }, 15000);
+
+            return true;""",
         1,
     ),
     (
@@ -451,6 +487,36 @@ KEEP_PATCHES = [
         """                    Integer visibility = account.visibility.get(packageName);
                     if (visibility == null || visibility == AccountManager.VISIBILITY_VISIBLE
                             || visibility == AccountManager.VISIBILITY_USER_MANAGED_VISIBLE) {""",
+        1,
+    ),
+    (
+        # A failed connection to Google's sign-in service used to end as the one word "bind failure",
+        # whatever the reason. Keep the reason (no service in this space, Android refused, Android
+        # declined) so the sign-in box can name it, and log when the service is slow to start.
+        "core/system/accounts/BAccountManagerService.java",
+        """        IAccountAuthenticator mAuthenticator = null;""",
+        """        IAccountAuthenticator mAuthenticator = null;
+
+        /** Why the sign-in service could not be reached, in words the person can read. */
+        String mBindProblem = null;""",
+        1,
+    ),
+    (
+        "core/system/accounts/BAccountManagerService.java",
+        """onError(AccountManager.ERROR_CODE_REMOTE_EXCEPTION, "bind failure");""",
+        """onError(AccountManager.ERROR_CODE_REMOTE_EXCEPTION,
+                        mBindProblem != null ? mBindProblem : "bind failure");""",
+        1,
+    ),
+    (
+        "core/system/accounts/BAccountManagerService.java",
+        """            if (authenticatorInfo == null) {
+                if (Log.isLoggable(TAG, Log.VERBOSE)) {
+                    Log.v(TAG, "there is no authenticator for " + authenticatorType""",
+        """            if (authenticatorInfo == null) {
+                mBindProblem = "no sign-in service for " + authenticatorType + " in space " + mAccounts.userId;
+                if (Log.isLoggable(TAG, Log.VERBOSE)) {
+                    Log.v(TAG, "there is no authenticator for " + authenticatorType""",
         1,
     ),
     (

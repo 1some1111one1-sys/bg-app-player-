@@ -9,7 +9,6 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import cbfg.rvadapter.RVAdapter
 import com.afollestad.materialdialogs.MaterialDialog
 import top.niunaijun.blackbox.BlackBoxCore
-import top.niunaijun.blackbox.fake.frameworks.GoogleSignIn
 import top.niunaijun.blackboxa.R
 import top.niunaijun.blackboxa.bean.GmsBean
 import top.niunaijun.blackboxa.databinding.ActivityGmsBinding
@@ -94,30 +93,8 @@ class GmsManagerActivity : LoadingActivity() {
 
     /** Adds a Google account in this space, which is what Play Store needs to sign in. */
     private fun signIn(item: GmsBean) {
-        toast(getString(R.string.gms_sign_in_starting))
-        GoogleSignIn.start(item.userID, object : GoogleSignIn.Listener {
-            override fun onScreenOpened() {
-                // Google's sign-in screen is now in front, inside the container.
-            }
-
-            override fun onSignedIn(accountName: String?) {
-                if (isFinishing || isDestroyed) return
-                toast(getString(R.string.gms_sign_in_done, accountName ?: ""))
-                openPlayStore(item.userID)
-            }
-
-            override fun onFailed(reason: String?) {
-                if (isFinishing || isDestroyed) return
-                MaterialDialog(this@GmsManagerActivity).show {
-                    title(R.string.gms_sign_in_failed)
-                    message(text = reason ?: "")
-                    positiveButton(R.string.gms_open_play_store) {
-                        openPlayStore(item.userID)
-                    }
-                    negativeButton(R.string.cancel)
-                }
-            }
-        })
+        // A box shows the progress and, if it goes wrong, the step it stopped at with a report to copy.
+        GoogleSignInDialogs.show(this, item.userID, Runnable { openPlayStore(item.userID) })
     }
 
     private fun openPlayStore(userID: Int) {

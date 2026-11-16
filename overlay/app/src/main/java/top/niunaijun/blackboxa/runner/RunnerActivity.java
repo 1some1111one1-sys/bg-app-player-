@@ -62,7 +62,7 @@ import java.util.regex.Pattern;
 import java.util.zip.ZipFile;
 
 import top.niunaijun.blackbox.BlackBoxCore;
-import top.niunaijun.blackbox.fake.frameworks.GoogleSignIn;
+import top.niunaijun.blackboxa.view.gms.GoogleSignInDialogs;
 import top.niunaijun.blackbox.entity.pm.InstallResult;
 import top.niunaijun.blackboxa.view.main.WelcomeActivity;
 
@@ -835,24 +835,10 @@ public class RunnerActivity extends Activity {
             setStatus("Turn on \"Google Play services in the container\" first, then sign in.");
             return;
         }
-        setStatus("Opening Google sign-in...");
-        GoogleSignIn.start(USER_ID, new GoogleSignIn.Listener() {
-            @Override
-            public void onScreenOpened() {
-                setStatus("Google's sign-in screen is open. Finish signing in there.");
-            }
-
-            @Override
-            public void onSignedIn(String accountName) {
-                setStatus("Signed in as " + accountName + ". Opening Play Store.");
-                if (BlackBoxCore.get().isInstalled("com.android.vending", USER_ID)) {
-                    BlackBoxCore.get().launchApk("com.android.vending", USER_ID);
-                }
-            }
-
-            @Override
-            public void onFailed(String message) {
-                setStatus(message);
+        // A box shows the progress and, if it goes wrong, the step it stopped at with a report to copy.
+        GoogleSignInDialogs.show(this, USER_ID, () -> {
+            if (BlackBoxCore.get().isInstalled("com.android.vending", USER_ID)) {
+                BlackBoxCore.get().launchApk("com.android.vending", USER_ID);
             }
         });
     }
