@@ -6,9 +6,11 @@ import android.accounts.IAccountManagerResponse;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -52,6 +54,9 @@ import top.niunaijun.blackbox.core.system.accounts.IBAccountManagerService;
 public final class GoogleSignIn {
     private static final String TAG = "BlackBoxAccounts";
     private static final String ACCOUNT_TYPE = "com.google";
+    private static final String GSF_PKG = "com.google.android.gsf";
+    /** Start of the log lines written by {@link AuthenticatorTap}. */
+    private static final String TAP_PREFIX = "authenticator tap: ";
 
     /** Without an answer after this long, Google's sign-in screen is tried directly as well. */
     private static final long DIRECT_AFTER_MS = 25_000;
@@ -72,6 +77,9 @@ public final class GoogleSignIn {
     };
 
     private static final Pattern EMAIL = Pattern.compile("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}");
+
+    /** ", process com.google.android.gms.persistent (pid 1234)" in the line the account service writes. */
+    private static final Pattern PROCESS_PID = Pattern.compile("process \\S+ \\(pid (\\d+)\\)");
 
     /** Matches one line of "logcat -v threadtime". */
     private static final Pattern LOG_LINE = Pattern.compile(
@@ -161,6 +169,8 @@ public final class GoogleSignIn {
                 "Google's sign-in service connected, the request is about to be sent"),
         ASKED(4, "Waiting for Google's sign-in screen...",
                 "Google's sign-in service was asked for the sign-in screen and has not answered"),
+        RECEIVED(4, "Google Play services is preparing its sign-in screen...",
+                "Google's sign-in service received the request and has not answered"),
         ANSWERED(5, "Opening Google's sign-in screen...",
                 "Google's sign-in service answered"),
         NOT_FOUND(10, "Google reported a problem...",
@@ -193,6 +203,17 @@ public final class GoogleSignIn {
         String raw;
     }
 
+    /** One line of the timeline of an attempt. */
+    private static final class TraceEntry {
+        final double seconds;
+        final String text;
+
+        TraceEntry(double seconds, String text) {
+            this.seconds = seconds;
+            this.text = text;
+        }
+    }
+
     private static final class Attempt {
         final int userId;
         final Listener listener;
@@ -200,7 +221,7 @@ public final class GoogleSignIn {
         final long startedAt = SystemClock.elapsedRealtime();
         final long startedWall = System.currentTimeMillis();
 
-        private final StringBuilder trace = new StringBuilder();
+        private final ArrayList<TraceEntry> trace = new ArrayList<>();
         private final StringBuilder facts = new StringBuilder();
         /** The sign-in lines of the container's log seen so far (the log can scroll away). */
         private final ArrayList<LogLine> seenLines = new ArrayList<>();
@@ -214,6 +235,13 @@ public final class GoogleSignIn {
         private volatile Stage stage = Stage.START;
         private volatile boolean logReadable = true;
         private volatile boolean markerSeen;
+        /** Process id of Google's sign-in service in the container (0 until the log tells). */
+        private volatile int authPid;
+        /** Set once Google's own side reported a definite error for the request. */
+        private volatile String tapError;
+        private volatile boolean tapReceivedNoted;
+        private volatile boolean tapReturnedNoted;
+        private volatile boolean tapStuckNoted;
         private int polls;
         private String lastProgress = "";
         private int accountsBefore;
@@ -247,12 +275,21 @@ public final class GoogleSignIn {
         }
 
         private void note(String text) {
-            String line = String.format(Locale.US, "%5.1f s  %s",
-                    (SystemClock.elapsedRealtime() - startedAt) / 1000.0, text);
             synchronized (trace) {
-                trace.append(line).append('\n');
+                trace.add(new TraceEntry((SystemClock.elapsedRealtime() - startedAt) / 1000.0, text));
             }
             Log.i(TAG, "sign-in attempt " + id + ": " + text);
+        }
+
+        /** A timeline entry stamped with the time of a log line (when the log was read later). */
+        private void noteAt(LogLine line, String text) {
+            double seconds = (line.key - keyOf(startedWall)) / 1000.0;
+            if (seconds < -2 || seconds > 3600) {
+                seconds = (SystemClock.elapsedRealtime() - startedAt) / 1000.0;
+            }
+            synchronized (trace) {
+                trace.add(new TraceEntry(Math.max(0, seconds), text));
+            }
         }
 
         private void fact(String text) {
@@ -283,6 +320,7 @@ public final class GoogleSignIn {
                 }
                 service = IBAccountManagerService.Stub.asInterface(binder);
                 describeSpace();
+                scanGoogleScreens();
 
                 request();
                 monitor();
@@ -317,13 +355,10 @@ public final class GoogleSignIn {
                 fact("Play Store in this space: could not be read");
             }
             try {
-                Intent probe = new Intent(AccountManager.ACTION_AUTHENTICATOR_INTENT);
-                probe.setPackage(GmsCore.GMS_PKG);
-                ResolveInfo found = BlackBoxCore.getBPackageManager().resolveService(probe, 0, null, userId);
-                fact("Sign-in service found by the container: "
-                        + (found != null && found.serviceInfo != null ? found.serviceInfo.name : "none"));
+                fact("Google Services Framework in this space: "
+                        + (BlackBoxCore.get().isInstalled(GSF_PKG, userId) ? "yes" : "no"));
             } catch (Throwable e) {
-                fact("Sign-in service found by the container: could not be read (" + e + ")");
+                fact("Google Services Framework in this space: could not be read");
             }
             try {
                 Account[] accounts = service.getAccountsAsUser(ACCOUNT_TYPE, userId);
@@ -334,9 +369,82 @@ public final class GoogleSignIn {
             }
         }
 
+        /**
+         * Lists the screens and sign-in services Google Play services declares, read from its own
+         * package file (the container's package list does not hand out the screens). Runs on its own
+         * thread because the package file is large; the result lands in the report's facts.
+         */
+        private void scanGoogleScreens() {
+            Thread thread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        ApplicationInfo app = BlackBoxCore.getBPackageManager()
+                                .getApplicationInfo(GmsCore.GMS_PKG, 0, userId);
+                        if (app == null || app.sourceDir == null) {
+                            fact("Google Play services package file: not found");
+                            return;
+                        }
+                        PackageInfo info = BlackBoxCore.getContext().getPackageManager().getPackageArchiveInfo(
+                                app.sourceDir, PackageManager.GET_ACTIVITIES | PackageManager.GET_SERVICES);
+                        if (info == null) {
+                            fact("Google Play services package file: could not be read");
+                            return;
+                        }
+                        StringBuilder screens = new StringBuilder();
+                        int shownScreens = 0;
+                        int allScreens = info.activities == null ? 0 : info.activities.length;
+                        if (info.activities != null) {
+                            for (ActivityInfo activity : info.activities) {
+                                if (activity == null || activity.name == null || shownScreens >= 40) {
+                                    continue;
+                                }
+                                String low = activity.name.toLowerCase(Locale.US);
+                                if (low.contains("minutemaid") || low.contains("addaccount")
+                                        || low.contains("accountintro") || low.contains("signin")
+                                        || low.contains("uiflows") || low.contains("login")) {
+                                    screens.append(shownScreens == 0 ? "" : ", ").append(shorten(activity.name));
+                                    shownScreens++;
+                                }
+                            }
+                        }
+                        StringBuilder services = new StringBuilder();
+                        int shownServices = 0;
+                        if (info.services != null) {
+                            for (ServiceInfo item : info.services) {
+                                if (item == null || item.name == null || shownServices >= 12) {
+                                    continue;
+                                }
+                                if (item.name.toLowerCase(Locale.US).contains("authenticator")) {
+                                    services.append(shownServices == 0 ? "" : ", ").append(shorten(item.name))
+                                            .append(item.processName == null ? "" : " [" + shorten(item.processName) + "]");
+                                    shownServices++;
+                                }
+                            }
+                        }
+                        fact("Google Play services screens: " + allScreens + " in all; sign-in related: "
+                                + (shownScreens == 0 ? "none" : screens.toString()));
+                        fact("Google Play services sign-in services: "
+                                + (shownServices == 0 ? "none" : services.toString()));
+                    } catch (Throwable e) {
+                        fact("Google Play services package file: could not be read (" + e + ")");
+                    }
+                }
+            }, "BlackBoxGoogleSignInScan");
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        private String shorten(String name) {
+            return name.startsWith(GmsCore.GMS_PKG + ".") ? name.substring(GmsCore.GMS_PKG.length() + 1) : name;
+        }
+
         private void request() throws Exception {
             Bundle options = new Bundle();
-            options.putString("androidPackageName", BlackBoxCore.getHostPkg());
+            // The request says it comes from Google Play services itself: this app is not a package
+            // of the container, so Google's service could not find it there, while its own package
+            // is always present. (Android's account service adds who is asking, see the engine patch.)
+            options.putString("androidPackageName", GmsCore.GMS_PKG);
 
             IAccountManagerResponse response = new IAccountManagerResponse.Stub() {
                 @Override
@@ -403,6 +511,9 @@ public final class GoogleSignIn {
                 case ASKED:
                     return "Google Play services started but never showed its sign-in screen (waited "
                             + seconds + " seconds).";
+                case RECEIVED:
+                    return "Google Play services got the sign-in request but never showed its sign-in "
+                            + "screen (waited " + seconds + " seconds).";
                 default:
                     return "Google sign-in did not finish (waited " + seconds + " seconds).";
             }
@@ -449,7 +560,14 @@ public final class GoogleSignIn {
                 return;
             }
             note("the account service reported error " + errorCode + ": " + errorMessage);
-            failOrTryDirect(friendlyError(errorCode, errorMessage));
+            String shown = friendlyError(errorCode, errorMessage);
+            if (errorMessage != null && errorMessage.startsWith("Google Play services refused the request")) {
+                // Google's own service answered with a definite error: no other way will do better,
+                // and the report right now still holds what that service wrote.
+                fail(shown);
+            } else {
+                failOrTryDirect(shown);
+            }
         }
 
         private String friendlyError(int errorCode, String errorMessage) {
@@ -770,6 +888,10 @@ public final class GoogleSignIn {
                 // The attempt's own notes are never steps of the container.
                 return;
             }
+            if (m.startsWith(TAP_PREFIX)) {
+                applyTapLine(line, m.substring(TAP_PREFIX.length()));
+                return;
+            }
             if (m.contains("no sign-in service is installed")) {
                 raise(Stage.NOT_FOUND);
             } else if (m.startsWith("sign-in service for ")) {
@@ -780,6 +902,14 @@ public final class GoogleSignIn {
                 raise(Stage.REFUSED);
             } else if (m.startsWith("connected to the sign-in service")) {
                 raise(Stage.CONNECTED);
+                Matcher where = PROCESS_PID.matcher(m);
+                if (where.find() && authPid == 0) {
+                    try {
+                        authPid = Integer.parseInt(where.group(1));
+                    } catch (NumberFormatException ignored) {
+                        // the pid stays unknown
+                    }
+                }
             } else if (m.startsWith("asking the sign-in service")) {
                 raise(Stage.ASKED);
             } else if (m.startsWith("the sign-in service answered")) {
@@ -788,6 +918,41 @@ public final class GoogleSignIn {
                 raise(Stage.DISCONNECTED);
             } else if (m.startsWith("sign-in error")) {
                 raise(Stage.ERROR);
+            }
+        }
+
+        /** A line written by the tap inside Google's sign-in service (see {@link AuthenticatorTap}). */
+        private void applyTapLine(LogLine line, String m) {
+            if (m.startsWith("connected in process ")) {
+                if (authPid == 0) {
+                    authPid = line.pid;
+                }
+                return;
+            }
+            if (m.startsWith("addAccount received")) {
+                authPid = line.pid;
+                raise(Stage.RECEIVED);
+                if (!tapReceivedNoted) {
+                    tapReceivedNoted = true;
+                    noteAt(line, "Google Play services received the request");
+                }
+            } else if (m.startsWith("addAccount returned after ")) {
+                if (!tapReturnedNoted) {
+                    tapReturnedNoted = true;
+                    noteAt(line, "Google Play services finished handling the request without an error, "
+                            + "and has not answered");
+                }
+            } else if (m.startsWith("addAccount FAILED after ")) {
+                raise(Stage.ERROR);
+                if (tapError == null) {
+                    tapError = clip(m, 300);
+                    noteAt(line, "Google Play services failed while handling the request");
+                }
+            } else if (m.startsWith("addAccount has not returned after ")) {
+                if (!tapStuckNoted) {
+                    tapStuckNoted = true;
+                    noteAt(line, "Google Play services is still busy with the request after 3 s");
+                }
             }
         }
 
@@ -809,8 +974,18 @@ public final class GoogleSignIn {
                 r.append("Result: ").append(headline).append('\n');
                 r.append("Stopped at: ").append(stage.report).append('\n');
                 r.append("Timeline:\n");
+                List<TraceEntry> entries;
                 synchronized (trace) {
-                    r.append(trace);
+                    entries = new ArrayList<>(trace);
+                }
+                Collections.sort(entries, new Comparator<TraceEntry>() {
+                    @Override
+                    public int compare(TraceEntry a, TraceEntry b) {
+                        return Double.compare(a.seconds, b.seconds);
+                    }
+                });
+                for (TraceEntry entry : entries) {
+                    r.append(String.format(Locale.US, "%5.1f s  %s\n", entry.seconds, entry.text));
                 }
                 r.append(logSection());
             } catch (Throwable e) {
@@ -822,7 +997,7 @@ public final class GoogleSignIn {
 
         /** The sign-in steps, crashes and other telling lines the container logged during the attempt. */
         private String logSection() {
-            List<String> raw = readLog(15000, "logcat", "-d", "-v", "threadtime", "-t", "15000");
+            List<String> raw = readLog(30000, "logcat", "-d", "-v", "threadtime", "-t", "30000");
             if (raw == null) {
                 return "Container log: could not be read on this phone.\n";
             }
@@ -847,8 +1022,8 @@ public final class GoogleSignIn {
                 }
             });
 
-            // 2. The last three crashes.
-            List<List<LogLine>> crashes = new ArrayList<>();
+            // 2. The last three crashes, with the reason of every "Caused by".
+            List<List<String>> crashes = new ArrayList<>();
             for (int i = 0; i < window.size(); i++) {
                 LogLine line = window.get(i);
                 if (!"AndroidRuntime".equals(line.tag) || !line.message.startsWith("FATAL EXCEPTION")) {
@@ -856,14 +1031,17 @@ public final class GoogleSignIn {
                 }
                 List<LogLine> block = new ArrayList<>();
                 block.add(line);
-                for (int j = i + 1; j < window.size() && block.size() < 14; j++) {
+                for (int j = i + 1; j < window.size() && j < i + 400 && block.size() < 90; j++) {
                     LogLine next = window.get(j);
                     if (next.pid != line.pid || !"AndroidRuntime".equals(next.tag)) {
+                        continue;
+                    }
+                    if (next.message.startsWith("FATAL EXCEPTION")) {
                         break;
                     }
                     block.add(next);
                 }
-                crashes.add(block);
+                crashes.add(summarizeCrash(block));
             }
 
             // 3. Other lines that usually explain a failed sign-in.
@@ -888,17 +1066,18 @@ public final class GoogleSignIn {
                 out.append("  (none; ").append(logReadable ? "the container wrote nothing"
                         : "the phone's log does not show them").append(")\n");
             }
-            int limit = Math.min(steps.size(), 70);
+            int limit = Math.min(steps.size(), 130);
             for (int i = steps.size() - limit; i < steps.size(); i++) {
-                out.append("  ").append(clip(steps.get(i).raw, 230)).append('\n');
+                out.append("  ").append(clip(steps.get(i).raw, 320)).append('\n');
             }
+            out.append(googleSide(window, steps));
             if (!crashes.isEmpty()) {
                 out.append(crashes.size() <= 3
                         ? "Crashes in the container (" + crashes.size() + "):\n"
                         : "Crashes in the container (" + crashes.size() + " in all, the last 3):\n");
                 for (int i = Math.max(0, crashes.size() - 3); i < crashes.size(); i++) {
-                    for (LogLine line : crashes.get(i)) {
-                        out.append("  ").append(clip(line.raw, 230)).append('\n');
+                    for (String text : crashes.get(i)) {
+                        out.append("  ").append(text).append('\n');
                     }
                     out.append('\n');
                 }
@@ -914,13 +1093,122 @@ public final class GoogleSignIn {
             return out.toString();
         }
 
+        /**
+         * One crash as short text: the first lines in full (they hold the reason), the reason of every
+         * "Caused by" in full, and the first few frames after each that are not Android's own plumbing.
+         */
+        private List<String> summarizeCrash(List<LogLine> block) {
+            List<String> out = new ArrayList<>();
+            int frames = 0;
+            int framesAllowed = 3;
+            for (int i = 0; i < block.size(); i++) {
+                LogLine line = block.get(i);
+                String text = line.message.trim();
+                if (i < 2) {
+                    out.add(clip(line.raw, 420));
+                } else if (text.startsWith("Caused by:")) {
+                    out.add(clip(line.raw, 700));
+                    frames = 0;
+                    framesAllowed = 6;
+                } else if (text.startsWith("at ")) {
+                    if (frames < framesAllowed && !isPlumbing(text)) {
+                        out.add(clip(line.raw, 230));
+                        frames++;
+                    }
+                } else if (!text.startsWith("...")) {
+                    out.add(clip(line.raw, 700));
+                }
+            }
+            return out;
+        }
+
+        private boolean isPlumbing(String frame) {
+            return frame.contains("android.app.ActivityThread") || frame.contains("android.os.Handler")
+                    || frame.contains("android.os.Looper") || frame.contains("com.android.internal.os")
+                    || frame.contains("java.lang.reflect") || frame.contains("android.app.servertransaction")
+                    || frame.contains("dalvik.system");
+        }
+
+        /**
+         * What Google Play services itself logged after it was asked: its errors and warnings, and the
+         * lines that mention accounts, permissions or callers. Written by a process of the container,
+         * so the phone's log holds them.
+         */
+        private String googleSide(List<LogLine> window, List<LogLine> steps) {
+            int pid = authPid;
+            if (pid <= 0) {
+                return "Google Play services' own log: its process could not be identified.\n";
+            }
+            long askedAt = 0;
+            for (LogLine step : steps) {
+                if (step.message.startsWith("asking the sign-in service")) {
+                    askedAt = step.key;
+                    break;
+                }
+            }
+            if (askedAt == 0) {
+                askedAt = keyOf(startedWall);
+            }
+            List<LogLine> mine = new ArrayList<>();
+            int errors = 0;
+            int warnings = 0;
+            for (LogLine line : window) {
+                if (line.pid != pid || line.key < askedAt - 300 || TAG.equals(line.tag)) {
+                    continue;
+                }
+                mine.add(line);
+                if (line.level == 'E' || line.level == 'F') {
+                    errors++;
+                } else if (line.level == 'W') {
+                    warnings++;
+                }
+            }
+            StringBuilder out = new StringBuilder();
+            out.append("Google Play services' own log after the request (process ").append(pid).append(", ")
+                    .append(mine.size()).append(" lines, ").append(errors).append(" errors, ")
+                    .append(warnings).append(" warnings):\n");
+            int shown = 0;
+            for (LogLine line : mine) {
+                if (!tellsAboutSignIn(line)) {
+                    continue;
+                }
+                if (shown >= 100) {
+                    out.append("  (more lines were left out)\n");
+                    break;
+                }
+                out.append("  ").append(clip(line.raw, 260)).append('\n');
+                shown++;
+            }
+            if (shown == 0) {
+                out.append("  (nothing worth showing)\n");
+            }
+            return out.toString();
+        }
+
+        private boolean tellsAboutSignIn(LogLine line) {
+            if (line.level == 'W' || line.level == 'E' || line.level == 'F') {
+                return true;
+            }
+            String tag = line.tag.toLowerCase(Locale.US);
+            if (tag.contains("auth") || tag.contains("chimera") || tag.contains("account")
+                    || tag.contains("binder") || tag.contains("signin") || tag.contains("gsf")) {
+                return true;
+            }
+            String text = line.message.toLowerCase(Locale.US);
+            return text.contains("exception") || text.contains("denied") || text.contains("permission")
+                    || text.contains("not allowed") || text.contains("caller") || text.contains("account")
+                    || text.contains("sign-in") || text.contains("signin") || text.contains("login")
+                    || text.contains("security");
+        }
+
         private boolean worthALook(LogLine line) {
             String text = line.message;
             if (text.contains("Not allowed to bind") || text.contains("SecurityException")
                     || text.contains("requires Google Play Store") || text.contains("signature is invalid")
                     || text.contains("GoogleSignatureVerifier") || text.contains("GooglePlayServicesUtil")
                     || text.contains("ClassNotFoundException") || text.contains("NoClassDefFoundError")
-                    || text.contains("UnsatisfiedLink") || text.contains("Fatal signal")) {
+                    || text.contains("UnsatisfiedLink") || text.contains("Fatal signal")
+                    || text.contains("Caught a RuntimeException") || text.contains("Binder call failed")) {
                 return true;
             }
             if (line.level == 'W' || line.level == 'E' || line.level == 'F') {

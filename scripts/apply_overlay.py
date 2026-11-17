@@ -306,7 +306,9 @@ KEEP_PATCHES = [
             }
 
             return true;""",
-        """            boolean bound = false;
+        """            mAuthPackage = authenticatorInfo.serviceInfo.packageName;
+            mAuthProcess = authenticatorInfo.serviceInfo.processName;
+            boolean bound = false;
             try {
                 bound = mContext.bindService(intent, this, flags);
             } catch (SecurityException e) {
@@ -395,7 +397,8 @@ KEEP_PATCHES = [
         """        public void onServiceConnected(ComponentName name, IBinder service) {
             mAuthenticator = IAccountAuthenticator.Stub.asInterface(service);""",
         """        public void onServiceConnected(ComponentName name, IBinder service) {
-            Log.i("BlackBoxAccounts", "connected to the sign-in service " + name + " (space " + mAccounts.userId + ")");
+            Log.i("BlackBoxAccounts", "connected to the sign-in service " + name + " (space " + mAccounts.userId + ")"
+                    + top.niunaijun.blackbox.fake.frameworks.AuthenticatorTap.whereIs(mAuthPackage, mAuthProcess, mAccounts.userId));
             mAuthenticator = IAccountAuthenticator.Stub.asInterface(service);""",
         1,
     ),
@@ -498,7 +501,11 @@ KEEP_PATCHES = [
         """        IAccountAuthenticator mAuthenticator = null;
 
         /** Why the sign-in service could not be reached, in words the person can read. */
-        String mBindProblem = null;""",
+        String mBindProblem = null;
+
+        /** Package and process of the sign-in service this session connects to (for the log). */
+        String mAuthPackage = null;
+        String mAuthProcess = null;""",
         1,
     ),
     (
@@ -517,6 +524,29 @@ KEEP_PATCHES = [
                 mBindProblem = "no sign-in service for " + authenticatorType + " in space " + mAccounts.userId;
                 if (Log.isLoggable(TAG, Log.VERBOSE)) {
                     Log.v(TAG, "there is no authenticator for " + authenticatorType""",
+        1,
+    ),
+    (
+        # Android adds who is asking (user id and process id of the caller) to the options of an
+        # "add account" request before it reaches the sign-in service. This engine added them only
+        # for token requests, and Google's service may look at them for an add-account request.
+        "core/system/accounts/BAccountManagerService.java",
+        """final Bundle options = (optionsIn == null) ? new Bundle() : optionsIn;""",
+        """final Bundle options = (optionsIn == null) ? new Bundle() : optionsIn;
+        options.putInt(AccountManager.KEY_CALLER_UID, Binder.getCallingUid());
+        options.putInt(AccountManager.KEY_CALLER_PID, Binder.getCallingPid());""",
+        1,
+    ),
+    (
+        # Put the "tap" (see AuthenticatorTap) in front of the sign-in service of Google Play services
+        # when it is connected inside a virtual-app process, so a request that fails or hangs in
+        # Google's service is written to the log instead of vanishing.
+        "app/dispatcher/AppServiceDispatcher.java",
+        """            IBinder iBinder = service.onBind(intent);
+""",
+        """            IBinder iBinder = service.onBind(intent);
+            iBinder = top.niunaijun.blackbox.fake.frameworks.AuthenticatorTap.wrap(intent, serviceInfo, iBinder);
+""",
         1,
     ),
     (

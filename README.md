@@ -177,6 +177,27 @@ failure", and logs when the service is still not connected after 15 seconds.
 - It gives up after 60 seconds. The GitHub build numbers can skip a number, because a failed run
   also uses one.
 
+**Looking inside Google's side of the sign-in (build 39).** The build 38 report showed that the
+container reaches Google Play services' sign-in service, sends it the request, and then hears
+nothing, with no error either. Android's account service talks to that service with one-way calls,
+and a one-way call has no answer, so an error inside Google's service (for example a refused
+permission) is thrown away and looks exactly like silence. Build 39 looks into that:
+
+- A small watcher (`AuthenticatorTap`) now sits in front of Google's sign-in service inside the
+  container. It writes down in the log (lines that start with `authenticator tap:`) that the request
+  arrived in Google's process, whether it ended with an error (the error and where it came from), and,
+  when it is still running after 3 seconds, where its thread is stuck. If the request ends with an
+  error, the error is passed on as the answer, so the sign-in box names the reason at once instead
+  of waiting a minute. Everything else is passed through unchanged. It only watches Google Play
+  services' own sign-in services.
+- The request now carries who is asking (user id and process id), as Android's own account service
+  adds it, and says it comes from Google Play services itself. Before, it named this app, which is not a
+  package of the container, and left the ids out.
+- The report now also holds Google Play services' own log lines from right after the request (its
+  errors and warnings and the lines that mention accounts, permissions or callers), the full reason
+  of every "Caused by" in a crash (the direct way had crashed with a message the old report cut off),
+  and a list of the sign-in screens and sign-in services Google Play services declares.
+
 **The Play Store record (builds after 35).** Google's own client code, which is inside every app that uses
 Play services, checks that the Play Store on the phone is the genuine one: it compares its signing
 certificate with Google's (log: `requires Google Play Store, but its signature is invalid`). The engine
@@ -253,6 +274,7 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/app/src/main/res/` | Colours, theme and layouts that restyle the BlackBox manager screens |
 | `overlay/Bcore/src/main/java/.../fake/service/ICredentialManagerProxy.java` | Answers Android's Credential Manager (Sign in with Google picker, passkeys) with "no saved logins" inside the container; without it Android refuses with a SecurityException and Instagram closes ~10 s after it starts |
 | `overlay/Bcore/src/main/java/.../fake/frameworks/GoogleSignIn.java` | Starts "add a Google account" for one space, opens Google's sign-in screen in the container, follows the steps in the log, tries the direct way and builds the report |
+| `overlay/Bcore/src/main/java/.../fake/frameworks/AuthenticatorTap.java` | Sits in front of Google Play services' sign-in service inside the container: logs the request arriving, the error it ends with, and where it is stuck; passes the error on as the answer |
 | `overlay/app/src/main/java/.../view/gms/GoogleSignInDialogs.java` | The boxes around a sign-in: progress, "screen is open", and the reason with a report to copy |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalFolders.java` | Creates the folders an app expects on "phone storage" inside the container before it starts |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalVolumes.java` | Points the storage volumes Android reports to an app at the container's own folder |
