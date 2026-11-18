@@ -620,7 +620,7 @@ KEEP_PATCHES = [
                 resolvedType, resultTo, resultWho, requestCode, flags, options, userId, topActivityRecord, activityInfo, launchModeFlags);
     }
 """,
-        """        if (intent.getBooleanExtra("bg_runner_from_host", false)) {
+        """        if (hasMarker(intent, "bg_runner_from_host")) {
             // Started by BG App Runner itself (Open with, sign-in return): launch from the host
             // instead of through the running app, which Android blocks while that app is hidden.
             return startActivityFromHost(intent, activityInfo, userId, launchModeFlags);
@@ -637,6 +637,26 @@ KEEP_PATCHES = [
         shadow.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         BlackBoxCore.getContext().startActivity(shadow);
         return 0;
+    }
+
+    /**
+     * Reads one of BG App Runner's own yes/no markers on an intent: as a category first (cheap, and
+     * safe for any intent), then as an extra. Every activity the container's apps start passes
+     * through here, so this must never disturb the intent: on Android 12 and older, reading the
+     * extras of an intent that holds a class this process does not know (an app's own Parcelable)
+     * throws, and leaves the intent without the extras that come after it, although it is still on
+     * its way to the app. So the extra is read from a copy, and a copy that cannot be read is simply
+     * "not marked".
+     */
+    private static boolean hasMarker(Intent intent, String marker) {
+        try {
+            if (intent.hasCategory(marker)) {
+                return true;
+            }
+            return new Intent(intent).getBooleanExtra(marker, false);
+        } catch (Throwable t) {
+            return false;
+        }
     }
 """,
         1,
@@ -707,7 +727,7 @@ KEEP_PATCHES = [
 """,
         """        Log.d(TAG, "startActivityLocked : " + resolveInfo.activityInfo);
         ActivityInfo activityInfo = resolveInfo.activityInfo;
-        if (intent.getBooleanExtra("bg_runner_auth_return", false)
+        if (hasMarker(intent, "bg_runner_auth_return")
                 && deliverToWaitingActivity(userId, activityInfo, intent)) {
             return 0;
         }
@@ -875,6 +895,58 @@ KEEP_PATCHES = [
             } catch (Throwable t) {
                 return top.niunaijun.blackbox.core.env.ExternalVolumes.redirect(method.invoke(who, args), BActivityThread.getUserId());
             }""",
+        1,
+    ),
+    (
+        # Google sign-in on Android 15: "Access denied, requires: android.permission.ACCOUNT_MANAGER".
+        # Google's sign-in service only takes requests from a caller that holds ACCOUNT_MANAGER, and
+        # asks Android whether the container's account service does. The hook above answers yes, but
+        # Android 15 asks with a second, device-aware method,
+        # checkPermissionForDevice(permission, pid, uid, deviceId), which nothing here covered, so the
+        # real system answered no and every sign-in request was refused. Answer that one permission
+        # the same way the older method does. Android 14 and older never call the new method (it does
+        # not exist there), so nothing changes on them; every other permission is passed on untouched.
+        "fake/service/IActivityManagerProxy.java",
+        """    @ProxyMethod("checkUriPermission")""",
+        """    @ProxyMethod("checkPermissionForDevice")
+    public static class checkPermissionForDevice extends MethodHook {
+        private static int sLogged = 0;
+
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            if (args != null && args.length > 0 && Manifest.permission.ACCOUNT_MANAGER.equals(args[0])) {
+                if (sLogged < 5) {
+                    sLogged++;
+                    Log.i("BlackBoxAccounts", "permission check for ACCOUNT_MANAGER (device-aware): granted");
+                }
+                return PackageManager.PERMISSION_GRANTED;
+            }
+            try {
+                return method.invoke(who, args);
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                throw e.getCause() != null ? e.getCause() : e;
+            }
+        }
+    }
+
+    @ProxyMethod("checkUriPermission")""",
+        1,
+    ),
+    (
+        # Second layer for the same problem, in case the permission check takes a way that is not
+        # hooked: Google's sign-in service tap (AuthenticatorTap) runs a refused request again with
+        # the system as the caller, which holds every permission. While that retry runs on its
+        # thread, report the system as the caller of this thread. Every other lookup pays one
+        # comparison.
+        "core/NativeCore.java",
+        """    public static int getCallingUid(int origCallingUid) {
+""",
+        """    public static int getCallingUid(int origCallingUid) {
+        int forcedUid = top.niunaijun.blackbox.fake.frameworks.AuthenticatorTap.forcedCallingUid();
+        if (forcedUid >= 0) {
+            return forcedUid;
+        }
+""",
         1,
     ),
 ]

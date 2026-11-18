@@ -198,6 +198,35 @@ permission) is thrown away and looks exactly like silence. Build 39 looks into t
   of every "Caused by" in a crash (the direct way had crashed with a message the old report cut off),
   and a list of the sign-in screens and sign-in services Google Play services declares.
 
+**The permission Android 15 refused (build 40).** The build 39 report, from an Android 15 phone, named
+the cause: Google's sign-in service threw `SecurityException: Access denied, requires:
+android.permission.ACCOUNT_MANAGER` as soon as the request reached it. That service only takes requests
+from a caller that holds this permission (on a real phone, the system itself) and asks Android whether
+the caller does. The engine answers yes to that question, but Android 15 asks it with a second,
+device-aware method (`checkPermissionForDevice`) that nothing covered, so the real system said no.
+Build 40 fixes it in two layers:
+
+- The engine now answers that second method too, for that one permission, the same way it answers
+  the older one. Every other permission is passed on untouched, and Android 14 and older never call the
+  new method, so nothing changes on them.
+- If the permission is refused anyway (by whatever route), the watcher runs the request once more with
+  the system (uid 1000) as the caller, which is who calls that service on a real phone. This applies to
+  that one request on its own thread only, and only to a refusal that names this permission and comes
+  from Android's own sign-in code, not from Google's. The log says `was refused for
+  android.permission.ACCOUNT_MANAGER ... trying again as the system`, and then whether the second try
+  worked.
+- The report now reads the container's log once more right before it is built, so "Stopped at" is never
+  older than the report, finds Google's process from the steps when the attempt ended before the first
+  look at the log, and lists the lines of every Google Play services process that is running or crashed
+  (the one that takes the request and the one that shows Google's sign-in screens).
+- For Android 10 to 12: every activity a container app starts passes through the engine, which read
+  two of this app's own yes/no markers from the intent's extras. On Android 12 and older, reading the
+  extras of an intent that holds a class the engine does not know (an app's own data class, or
+  Google's) fails or drops the extras after it. The markers are now read from a copy of the intent,
+  and the marker on Google's sign-in screen is a category instead of an extra. Android 13 and newer
+  read such extras only when they are used, so they were not affected. Not tested on a phone with
+  Android 10 to 12.
+
 **The Play Store record (builds after 35).** Google's own client code, which is inside every app that uses
 Play services, checks that the Play Store on the phone is the genuine one: it compares its signing
 certificate with Google's (log: `requires Google Play Store, but its signature is invalid`). The engine
@@ -274,7 +303,7 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/app/src/main/res/` | Colours, theme and layouts that restyle the BlackBox manager screens |
 | `overlay/Bcore/src/main/java/.../fake/service/ICredentialManagerProxy.java` | Answers Android's Credential Manager (Sign in with Google picker, passkeys) with "no saved logins" inside the container; without it Android refuses with a SecurityException and Instagram closes ~10 s after it starts |
 | `overlay/Bcore/src/main/java/.../fake/frameworks/GoogleSignIn.java` | Starts "add a Google account" for one space, opens Google's sign-in screen in the container, follows the steps in the log, tries the direct way and builds the report |
-| `overlay/Bcore/src/main/java/.../fake/frameworks/AuthenticatorTap.java` | Sits in front of Google Play services' sign-in service inside the container: logs the request arriving, the error it ends with, and where it is stuck; passes the error on as the answer |
+| `overlay/Bcore/src/main/java/.../fake/frameworks/AuthenticatorTap.java` | Sits in front of Google Play services' sign-in service inside the container: logs the request arriving, the error it ends with, and where it is stuck; passes the error on as the answer; runs a request again as the system when Android refused it for the account-manager permission |
 | `overlay/app/src/main/java/.../view/gms/GoogleSignInDialogs.java` | The boxes around a sign-in: progress, "screen is open", and the reason with a report to copy |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalFolders.java` | Creates the folders an app expects on "phone storage" inside the container before it starts |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalVolumes.java` | Points the storage volumes Android reports to an app at the container's own folder |

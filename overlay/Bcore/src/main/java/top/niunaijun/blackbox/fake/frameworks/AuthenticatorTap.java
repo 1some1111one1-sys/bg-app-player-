@@ -14,6 +14,8 @@ import android.os.RemoteException;
 import android.os.SystemClock;
 import android.util.Log;
 
+import java.util.concurrent.atomic.AtomicInteger;
+
 import top.niunaijun.blackbox.app.BActivityThread;
 import top.niunaijun.blackbox.core.system.BProcessManagerService;
 import top.niunaijun.blackbox.core.system.ProcessRecord;
@@ -32,6 +34,11 @@ import top.niunaijun.blackbox.core.system.ProcessRecord;
  *
  * Everything else goes through unchanged: every call is handed to the real service as it came in,
  * with the caller's identity intact, and anything it throws is thrown again.
+ *
+ * One exception to that: the service only takes requests from a caller that holds the
+ * ACCOUNT_MANAGER permission, which in real Android is the system itself. When it refuses a request
+ * for that permission, the request is tried once more with the system as the caller (the container
+ * has no real system process to call it), see {@link #onTransact} and {@link #forcedCallingUid()}.
  */
 public final class AuthenticatorTap extends Binder {
     private static final String TAG = "BlackBoxAccounts";
@@ -49,6 +56,11 @@ public final class AuthenticatorTap extends Binder {
     /** A request still running after this long gets its stack written to the log. */
     private static final long SLOW_AFTER_MS = 3_000;
     private static final long STILL_SLOW_AFTER_MS = 12_000;
+
+    /** Set on the thread that is running a request again as the system (see {@link #onTransact}). */
+    private static final ThreadLocal<Boolean> sAsSystem = new ThreadLocal<>();
+    /** How many threads are inside such a retry: lets every other lookup skip the thread check. */
+    private static final AtomicInteger sAsSystemCount = new AtomicInteger();
 
     private final IBinder real;
     private final String descriptor;
@@ -112,6 +124,23 @@ public final class AuthenticatorTap extends Binder {
         }
     }
 
+    /**
+     * For the engine's replacement of {@code Binder.getCallingUid()}: the uid to report instead of the
+     * real caller's, or -1 for no change. Only a request that is being run again as the system (see
+     * {@link #onTransact}) gets one, and only on its own thread; every other lookup costs one
+     * comparison. Never throws.
+     */
+    public static int forcedCallingUid() {
+        try {
+            if (sAsSystemCount.get() > 0 && sAsSystem.get() != null) {
+                return Process.SYSTEM_UID;
+            }
+        } catch (Throwable ignored) {
+            // a plain uid lookup must never fail because of this
+        }
+        return -1;
+    }
+
     // ------------------------------------------------------------------------------ the binder
 
     @Override
@@ -153,12 +182,66 @@ public final class AuthenticatorTap extends Binder {
             Log.i(TAG, PREFIX + call + " returned after " + (SystemClock.elapsedRealtime() - begun)
                     + " ms without an error");
             return handled;
-        } catch (Throwable e) {
-            reportFailure(call, code, data, e, begun);
-            throw e;
+        } catch (Throwable first) {
+            if (!isPermissionRefusal(first)) {
+                reportFailure(call, first, data, begun, "");
+                throw first;
+            }
+            // Refused for the ACCOUNT_MANAGER permission: the service wants the system as its caller.
+            Log.w(TAG, PREFIX + call + " was refused for android.permission.ACCOUNT_MANAGER after "
+                    + (SystemClock.elapsedRealtime() - begun) + " ms (" + first.getMessage()
+                    + "), trying again as the system (uid " + Process.SYSTEM_UID + ")");
+            try {
+                boolean handled = transactAsSystem(code, data, reply, flags);
+                Log.i(TAG, PREFIX + call + " returned after " + (SystemClock.elapsedRealtime() - begun)
+                        + " ms without an error (second try, as the system)");
+                return handled;
+            } catch (Throwable second) {
+                reportFailure(call, second, data, begun, " (second try, as the system)");
+                throw second;
+            }
         } finally {
             watchdog.finish();
         }
+    }
+
+    /**
+     * Runs the call again with the system (uid 1000) as the caller, on this thread only. The
+     * data has been read once already; {@code transact} starts reading it from the beginning.
+     */
+    private boolean transactAsSystem(int code, Parcel data, Parcel reply, int flags) throws RemoteException {
+        sAsSystem.set(Boolean.TRUE);
+        sAsSystemCount.incrementAndGet();
+        try {
+            return real.transact(code, data, reply, flags);
+        } finally {
+            sAsSystemCount.decrementAndGet();
+            sAsSystem.remove();
+        }
+    }
+
+    /**
+     * True for the refusal that Android's own sign-in plumbing (not Google's code) throws when the
+     * caller does not hold the ACCOUNT_MANAGER permission: a SecurityException that names the
+     * permission and was thrown from {@code android.accounts} or {@code android.os.PermissionEnforcer}.
+     * Anything else is not a reason to run the request a second time.
+     */
+    private static boolean isPermissionRefusal(Throwable error) {
+        Throwable t = error;
+        for (int depth = 0; t != null && depth < 4; depth++, t = t.getCause()) {
+            String text = t.getMessage();
+            if (!(t instanceof SecurityException) || text == null || !text.contains("ACCOUNT_MANAGER")) {
+                continue;
+            }
+            StackTraceElement[] frames = t.getStackTrace();
+            for (int i = 0; i < frames.length && i < 8; i++) {
+                String owner = frames[i].getClassName();
+                if (owner.startsWith("android.accounts.") || owner.equals("android.os.PermissionEnforcer")) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // ------------------------------------------------------------------------------ the details
@@ -205,10 +288,10 @@ public final class AuthenticatorTap extends Binder {
         return s.append(']').toString();
     }
 
-    private void reportFailure(String call, int code, Parcel data, Throwable e, long begun) {
+    private void reportFailure(String call, Throwable e, Parcel data, long begun, String how) {
         try {
             Log.w(TAG, PREFIX + call + " FAILED after " + (SystemClock.elapsedRealtime() - begun)
-                    + " ms: " + e);
+                    + " ms" + how + ": " + e);
             Throwable t = e;
             for (int depth = 0; t != null && depth < 4; depth++, t = t.getCause()) {
                 if (depth > 0) {

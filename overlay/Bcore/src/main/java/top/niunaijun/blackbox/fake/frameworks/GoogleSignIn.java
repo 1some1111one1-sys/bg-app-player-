@@ -3,6 +3,7 @@ package top.niunaijun.blackbox.fake.frameworks;
 import android.accounts.Account;
 import android.accounts.AccountManager;
 import android.accounts.IAccountManagerResponse;
+import android.app.ActivityManager;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
@@ -27,8 +28,10 @@ import java.util.Calendar;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -37,6 +40,7 @@ import top.niunaijun.blackbox.BlackBoxCore;
 import top.niunaijun.blackbox.core.GmsCore;
 import top.niunaijun.blackbox.core.system.ServiceManager;
 import top.niunaijun.blackbox.core.system.accounts.IBAccountManagerService;
+import top.niunaijun.blackbox.entity.am.RunningAppProcessInfo;
 
 /**
  * Starts "add a Google account" for one space of the container, the same request Android's own
@@ -80,6 +84,12 @@ public final class GoogleSignIn {
 
     /** ", process com.google.android.gms.persistent (pid 1234)" in the line the account service writes. */
     private static final Pattern PROCESS_PID = Pattern.compile("process \\S+ \\(pid (\\d+)\\)");
+
+    /** The same text with the name of the process captured too (group 1 name, group 2 id). */
+    private static final Pattern PROCESS_NAMED_PID = Pattern.compile("process (\\S+) \\(pid (\\d+)\\)");
+
+    /** "Process: com.google.android.gms.ui, PID: 23827" in a crash the log holds. */
+    private static final Pattern CRASHED_PROCESS = Pattern.compile("Process: ([^,\\s]+), PID: (\\d+)");
 
     /** Matches one line of "logcat -v threadtime". */
     private static final Pattern LOG_LINE = Pattern.compile(
@@ -240,6 +250,7 @@ public final class GoogleSignIn {
         /** Set once Google's own side reported a definite error for the request. */
         private volatile String tapError;
         private volatile boolean tapReceivedNoted;
+        private volatile boolean tapRefusedNoted;
         private volatile boolean tapReturnedNoted;
         private volatile boolean tapStuckNoted;
         private int polls;
@@ -628,7 +639,9 @@ public final class GoogleSignIn {
                 note("opening the sign-in screen " + target);
                 screen.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 // Start it from this app (which is on screen) rather than through a running container app.
-                screen.putExtra("bg_runner_from_host", true);
+                // The marker is a category, not an extra: the intent is Google's, and on Android 12 and
+                // older adding an extra opens all of its extras, which fails on Google's own classes.
+                screen.addCategory("bg_runner_from_host");
                 BlackBoxCore.getBActivityManager().startActivity(screen, userId);
                 markOpened();
             } catch (Throwable e) {
@@ -948,6 +961,12 @@ public final class GoogleSignIn {
                     tapError = clip(m, 300);
                     noteAt(line, "Google Play services failed while handling the request");
                 }
+            } else if (m.startsWith("addAccount was refused for ")) {
+                if (!tapRefusedNoted) {
+                    tapRefusedNoted = true;
+                    noteAt(line, "Google Play services refused the request for the account-manager "
+                            + "permission; asked again as the system");
+                }
             } else if (m.startsWith("addAccount has not returned after ")) {
                 if (!tapStuckNoted) {
                     tapStuckNoted = true;
@@ -967,12 +986,22 @@ public final class GoogleSignIn {
         String buildReport(String headline) {
             StringBuilder r = new StringBuilder();
             try {
+                // The attempt may have ended (or the report been asked for) before the log was looked
+                // at, so read it once more now: "stopped at" must not be older than the report.
+                try {
+                    refreshStage();
+                } catch (Throwable ignored) {
+                    // the report goes on with what is known
+                }
                 r.append("BG App Runner, Google sign-in report\n");
                 synchronized (facts) {
                     r.append(facts);
                 }
                 r.append("Result: ").append(headline).append('\n');
-                r.append("Stopped at: ").append(stage.report).append('\n');
+                String error = tapError;
+                r.append("Stopped at: ").append(stage == Stage.ERROR && error != null
+                        ? "Google Play services failed while handling the request (" + error + ")"
+                        : stage.report).append('\n');
                 r.append("Timeline:\n");
                 List<TraceEntry> entries;
                 synchronized (trace) {
@@ -1131,14 +1160,26 @@ public final class GoogleSignIn {
 
         /**
          * What Google Play services itself logged after it was asked: its errors and warnings, and the
-         * lines that mention accounts, permissions or callers. Written by a process of the container,
-         * so the phone's log holds them.
+         * lines that mention accounts, permissions or callers. Written by processes of the container,
+         * so the phone's log holds them. The process that handles the sign-in request comes first; the
+         * screens of Google's sign-in run in another process of the same package, which follows.
          */
         private String googleSide(List<LogLine> window, List<LogLine> steps) {
-            int pid = authPid;
-            if (pid <= 0) {
-                return "Google Play services' own log: its process could not be identified.\n";
+            int main = authPid > 0 ? authPid : pidFromSteps(steps);
+
+            // Every process of Google Play services that can be named: the one that took the request,
+            // the ones running now, and the ones that crashed (they are not running any more).
+            Map<Integer, String> processes = new LinkedHashMap<>();
+            if (main > 0) {
+                processes.put(main, "");
             }
+            addNames(processes, namesFromSteps(steps));
+            addNames(processes, googleProcesses());
+            addNames(processes, crashedGoogleProcesses(window));
+            if (processes.isEmpty()) {
+                return "Google Play services' own log: its processes could not be identified.\n";
+            }
+
             long askedAt = 0;
             for (LogLine step : steps) {
                 if (step.message.startsWith("asking the sign-in service")) {
@@ -1149,11 +1190,42 @@ public final class GoogleSignIn {
             if (askedAt == 0) {
                 askedAt = keyOf(startedWall);
             }
+
+            StringBuilder out = new StringBuilder();
+            int sections = 0;
+            for (Map.Entry<Integer, String> entry : processes.entrySet()) {
+                if (sections >= 5) {
+                    out.append("(more processes of Google Play services were left out)\n");
+                    break;
+                }
+                int pid = entry.getKey();
+                out.append(processLog(window, pid, entry.getValue(), askedAt, pid == main ? 90 : 45,
+                        pid == main));
+                sections++;
+            }
+            return out.toString();
+        }
+
+        /** Adds the processes of {@code more}; a name that is already known is kept, an empty one is filled in. */
+        private void addNames(Map<Integer, String> into, Map<Integer, String> more) {
+            for (Map.Entry<Integer, String> entry : more.entrySet()) {
+                String known = into.get(entry.getKey());
+                if (known == null || known.isEmpty()) {
+                    into.put(entry.getKey(), entry.getValue());
+                }
+            }
+        }
+
+        /** One process of Google Play services: its line counts, then the lines that tell something. */
+        private String processLog(List<LogLine> window, int pid, String name, long askedAt, int cap,
+                boolean takesRequest) {
             List<LogLine> mine = new ArrayList<>();
             int errors = 0;
             int warnings = 0;
             for (LogLine line : window) {
-                if (line.pid != pid || line.key < askedAt - 300 || TAG.equals(line.tag)) {
+                // Crashes are summarised on their own, further down.
+                if (line.pid != pid || line.key < askedAt - 300 || TAG.equals(line.tag)
+                        || "AndroidRuntime".equals(line.tag)) {
                     continue;
                 }
                 mine.add(line);
@@ -1164,15 +1236,17 @@ public final class GoogleSignIn {
                 }
             }
             StringBuilder out = new StringBuilder();
-            out.append("Google Play services' own log after the request (process ").append(pid).append(", ")
-                    .append(mine.size()).append(" lines, ").append(errors).append(" errors, ")
+            out.append("Google Play services' own log after the request (process ")
+                    .append(name == null || name.isEmpty() ? "" : name + ", pid ")
+                    .append(pid).append(takesRequest ? ", handles the sign-in request" : "")
+                    .append(", ").append(mine.size()).append(" lines, ").append(errors).append(" errors, ")
                     .append(warnings).append(" warnings):\n");
             int shown = 0;
             for (LogLine line : mine) {
                 if (!tellsAboutSignIn(line)) {
                     continue;
                 }
-                if (shown >= 100) {
+                if (shown >= cap) {
                     out.append("  (more lines were left out)\n");
                     break;
                 }
@@ -1183,6 +1257,85 @@ public final class GoogleSignIn {
                 out.append("  (nothing worth showing)\n");
             }
             return out.toString();
+        }
+
+        /**
+         * The process id of Google's sign-in service, read from the lines of the steps when the
+         * attempt ended before any of them was looked at. The tap writes its lines from inside that
+         * process, so the id of such a line is the one; the account service names it as well.
+         */
+        private int pidFromSteps(List<LogLine> steps) {
+            int named = 0;
+            for (LogLine step : steps) {
+                if (step.message.startsWith(TAP_PREFIX)) {
+                    return step.pid;
+                }
+                if (named == 0 && step.message.startsWith("connected to the sign-in service")) {
+                    Matcher where = PROCESS_PID.matcher(step.message);
+                    if (where.find()) {
+                        try {
+                            named = Integer.parseInt(where.group(1));
+                        } catch (NumberFormatException ignored) {
+                            // not usable
+                        }
+                    }
+                }
+            }
+            return named;
+        }
+
+        /** Id and name of the processes the sign-in steps themselves name (the account service and the tap do). */
+        private Map<Integer, String> namesFromSteps(List<LogLine> steps) {
+            Map<Integer, String> found = new LinkedHashMap<>();
+            for (LogLine step : steps) {
+                Matcher m = PROCESS_NAMED_PID.matcher(step.message);
+                if (m.find()) {
+                    try {
+                        found.put(Integer.parseInt(m.group(2)), m.group(1));
+                    } catch (NumberFormatException ignored) {
+                        // not usable
+                    }
+                }
+            }
+            return found;
+        }
+
+        /** Id and name of every process of Google Play services running in the container right now. */
+        private Map<Integer, String> googleProcesses() {
+            Map<Integer, String> found = new LinkedHashMap<>();
+            try {
+                RunningAppProcessInfo info = BlackBoxCore.getBActivityManager()
+                        .getRunningAppProcesses(GmsCore.GMS_PKG, userId);
+                if (info != null && info.mAppProcessInfoList != null) {
+                    for (ActivityManager.RunningAppProcessInfo process : info.mAppProcessInfoList) {
+                        if (process != null && process.pid > 0) {
+                            found.put(process.pid, process.processName == null ? "" : process.processName);
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {
+                // the report goes on without the names
+            }
+            return found;
+        }
+
+        /** Id and name of every process of Google Play services that crashed during the attempt. */
+        private Map<Integer, String> crashedGoogleProcesses(List<LogLine> window) {
+            Map<Integer, String> found = new LinkedHashMap<>();
+            for (LogLine line : window) {
+                if (!"AndroidRuntime".equals(line.tag)) {
+                    continue;
+                }
+                Matcher m = CRASHED_PROCESS.matcher(line.message);
+                if (m.find() && m.group(1).startsWith(GmsCore.GMS_PKG)) {
+                    try {
+                        found.put(Integer.parseInt(m.group(2)), m.group(1));
+                    } catch (NumberFormatException ignored) {
+                        // not usable
+                    }
+                }
+            }
+            return found;
         }
 
         private boolean tellsAboutSignIn(LogLine line) {
