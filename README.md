@@ -227,6 +227,31 @@ Build 40 fixes it in two layers:
   read such extras only when they are used, so they were not affected. Not tested on a phone with
   Android 10 to 12.
 
+**The app-restrictions refusal (build 41).** The build 40 report, from the same Android 15 phone, showed
+that the permission step now passes (`permission check for ACCOUNT_MANAGER (device-aware): granted`)
+and that Google's sign-in service then stopped at its next step. It asks Android for the "app
+restrictions" of Google Play services (rules a work profile or school account can set; a normal phone
+has none). On Android 15 that question reaches the system through a new method,
+`getApplicationRestrictionsForUser`, which the engine did not cover (it only covered the older
+`getApplicationRestrictions`). The real system only answers it for the system itself or for the
+asking app's own package, so it refused (`Only system may: get application restrictions for other
+user/app com.google.android.gms`) and Google's service answered the request with `addAccount failed`.
+Build 41:
+
+- covers the new method the same way as the old one: the question is asked for the phone's own package
+  and user, which the system does answer for the app that asks. If the system still refuses, the
+  answer is "no restrictions" (an empty answer, what a phone without such rules gives) and the log
+  gets one line, `application restrictions: the system refused (...), answering with none`. Android
+  14 and older never call the new method, so nothing changes on them.
+- picks the lines of Google's processes in the report by importance (errors, crashes and lines that
+  name accounts, permissions or callers first), prints them in time order, and says how many less
+  important lines were left out. In the build 40 report the section of Google's sign-in screen
+  process was filled with harmless stack lines before it reached the real errors. Lines that only
+  report the container's own start-up (`nativeloader`, `HookManager`) no longer count as sign-in
+  lines at all.
+
+This is the second refusal found this way, and there may be more behind it. Not confirmed on a phone yet.
+
 **The Play Store record (builds after 35).** Google's own client code, which is inside every app that uses
 Play services, checks that the Play Store on the phone is the genuine one: it compares its signing
 certificate with Google's (log: `requires Google Play Store, but its signature is invalid`). The engine
@@ -315,5 +340,5 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/app/src/main/java/.../runner/KeepAliveService.java` | Foreground service with a partial wake lock |
 | `overlay/Bcore/.../StayActive.java` | Engine-side hook behind "Stay active in background" and the Java side of the mute |
 | `overlay/Bcore/src/main/cpp/BgMute/BgMute.cpp` | Native AudioTrack hook that mutes game audio in the background |
-| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources |
+| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources, among them the engine's `IActivityManagerProxy` (device-aware permission check, Android 15), `IUserManagerProxy` (app restrictions for a user, Android 15), `NativeCore` (calling user id for the retry as system) and `ActivityStack` (host-start markers) |
 | `.github/workflows/build-apk.yml` | Builds the APK on GitHub Actions |

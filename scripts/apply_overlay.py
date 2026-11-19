@@ -949,6 +949,41 @@ KEEP_PATCHES = [
 """,
         1,
     ),
+    (
+        # Google sign-in on Android 15, the refusal after the permission one: Google's sign-in
+        # service reads its "application restrictions" (a managed-phone setting) before it builds the
+        # sign-in screen, and the real system answered "Only system may: get application restrictions
+        # for other user/app com.google.android.gms", so every request ended as "addAccount failed".
+        # The hook above covers getApplicationRestrictions(packageName), which is what older Android
+        # calls; Android 15's UserManager calls getApplicationRestrictionsForUser(packageName, userId),
+        # which went to the system with the container app's package and the container's user, and the
+        # system only answers that for the caller's own package and user. Ask the same way the hook
+        # above does (as this app, in the user this app really runs in), and if the system still
+        # refuses, say there are no restrictions, which is the answer of a phone nobody manages.
+        "fake/service/IUserManagerProxy.java",
+        """    @ProxyMethod("getProfileParent")""",
+        """    @ProxyMethod("getApplicationRestrictionsForUser")
+    public static class GetApplicationRestrictionsForUser extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            try {
+                if (args != null && args.length >= 2 && args[0] instanceof String && args[1] instanceof Integer) {
+                    args[0] = BlackBoxCore.getHostPkg();
+                    args[1] = BlackBoxCore.getHostUid() / 100000;
+                }
+                return method.invoke(who, args);
+            } catch (Throwable e) {
+                Throwable cause = e.getCause() != null ? e.getCause() : e;
+                android.util.Log.w("BlackBoxAccounts", "application restrictions: the system refused (" + cause
+                        + "), answering with none");
+                return new android.os.Bundle();
+            }
+        }
+    }
+
+    @ProxyMethod("getProfileParent")""",
+        1,
+    ),
 ]
 
 

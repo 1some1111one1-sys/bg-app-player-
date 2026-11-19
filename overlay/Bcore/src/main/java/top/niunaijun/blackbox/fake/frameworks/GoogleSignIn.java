@@ -1241,22 +1241,64 @@ public final class GoogleSignIn {
                     .append(pid).append(takesRequest ? ", handles the sign-in request" : "")
                     .append(", ").append(mine.size()).append(" lines, ").append(errors).append(" errors, ")
                     .append(warnings).append(" warnings):\n");
-            int shown = 0;
+            List<LogLine> candidates = new ArrayList<>();
             for (LogLine line : mine) {
-                if (!tellsAboutSignIn(line)) {
-                    continue;
+                if (tellsAboutSignIn(line)) {
+                    candidates.add(line);
                 }
-                if (shown >= cap) {
-                    out.append("  (more lines were left out)\n");
-                    break;
-                }
-                out.append("  ").append(clip(line.raw, 260)).append('\n');
-                shown++;
             }
-            if (shown == 0) {
+            // Too many to show: keep the ones that matter most (errors first, then warnings, then
+            // lines that only mention accounts and the like; a stack frame is worth the least, so a
+            // long trace of something harmless cannot crowd out the real errors after it), and print
+            // them in the order they were written.
+            List<LogLine> chosen = candidates;
+            if (candidates.size() > cap) {
+                final List<LogLine> source = candidates;
+                List<Integer> order = new ArrayList<>();
+                for (int i = 0; i < source.size(); i++) {
+                    order.add(i);
+                }
+                Collections.sort(order, new Comparator<Integer>() {
+                    @Override
+                    public int compare(Integer a, Integer b) {
+                        int byWorth = Integer.compare(importance(source.get(b)), importance(source.get(a)));
+                        return byWorth != 0 ? byWorth : Integer.compare(a, b);
+                    }
+                });
+                List<Integer> keep = new ArrayList<>(order.subList(0, cap));
+                Collections.sort(keep);
+                chosen = new ArrayList<>();
+                for (int index : keep) {
+                    chosen.add(source.get(index));
+                }
+            }
+            for (LogLine line : chosen) {
+                out.append("  ").append(clip(line.raw, 260)).append('\n');
+            }
+            if (candidates.size() > chosen.size()) {
+                out.append("  (").append(candidates.size() - chosen.size())
+                        .append(" less important lines were left out)\n");
+            }
+            if (chosen.isEmpty()) {
                 out.append("  (nothing worth showing)\n");
             }
             return out.toString();
+        }
+
+        /** How much a line of Google's log is worth showing when there are too many of them. */
+        private int importance(LogLine line) {
+            String text = line.message.trim();
+            boolean frame = text.startsWith("at ") || text.startsWith("...");
+            if (line.tag.equals("nativeloader") || line.tag.equals("HookManager")) {
+                return 0;
+            }
+            if (line.level == 'E' || line.level == 'F') {
+                return frame ? 2 : 5;
+            }
+            if (line.level == 'W') {
+                return frame ? 1 : 3;
+            }
+            return 2;
         }
 
         /**
@@ -1341,6 +1383,10 @@ public final class GoogleSignIn {
         private boolean tellsAboutSignIn(LogLine line) {
             if (line.level == 'W' || line.level == 'E' || line.level == 'F') {
                 return true;
+            }
+            if (line.tag.equals("nativeloader") || line.tag.equals("HookManager")) {
+                // these name every library and hook, and match words like "caller" or "account"
+                return false;
             }
             String tag = line.tag.toLowerCase(Locale.US);
             if (tag.contains("auth") || tag.contains("chimera") || tag.contains("account")
