@@ -213,6 +213,12 @@ public final class NewIntentCompat {
         if (intent.getComponent() != null) {
             out.append(" component=").append(intent.getComponent().flattenToShortString());
         }
+        if (intent.getPackage() != null) {
+            out.append(" package=").append(intent.getPackage());
+        }
+        if (intent.getCategories() != null && !intent.getCategories().isEmpty()) {
+            out.append(" categories=").append(intent.getCategories());
+        }
         Uri data = intent.getData();
         if (data != null) {
             out.append(" scheme=").append(data.getScheme());

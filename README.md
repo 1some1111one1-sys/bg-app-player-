@@ -252,6 +252,69 @@ Build 41:
 
 This is the second refusal found this way, and there may be more behind it. Not confirmed on a phone yet.
 
+**Phones where the container runs in a second Android user (build 42).** On a Lava phone (Android 14)
+the container app is installed in Android user 10, and there Google's sign-in service never answered,
+so "Opening Google sign-in" never ended. The Xiaomi (user 0) did not have this problem. The log of the
+Lava shows why:
+
+- Android keeps one copy of an app's code in a process (a `LoadedApk`, which also owns the app's
+  `Application`) and finds it again by package name, but only when the app's uid belongs to the same
+  Android user as the process. The engine gives a virtual app a plain app id as its uid, which Android
+  reads as user 0. In a process of user 10, Android therefore decides "different user", does not keep
+  the copy, and builds a new one for every request, with no `Application` in it.
+- What that did to Google Play services: its services were created with a context that had no
+  `Application`, so its start-up code hit a null pointer (`Context.isDeviceProtectedStorage()` on
+  null) and its proxy services logged `Proxy without impl failing onBind()`; the sign-in service never
+  came up. Starting one of its screens built a second copy of its `Application`, which its code
+  refuses (an exception from the constructor), so the process of its sign-in screens crashed over and
+  over.
+
+Build 42 puts that right, only when the user of the process and the user of the app's uid differ:
+
+- `LoadedApkRegistry` files the copy the engine built for the app under its package name in Android's
+  own table (`ActivityThread.mPackages`), so services and every later lookup get that one.
+- When a screen is launched (Android 13 and newer, and Android 9 to 11; Android 12 already hands the
+  code over itself) the launch info carries the app's uid in the process's own user, so the lookup is
+  not turned away as "different user" and finds the same copy instead of building a second one.
+- On the primary user nothing happens beyond one comparison, so phones like the Xiaomi (user 0) behave
+  exactly as before. The log tag `LoadedApkRegistry` says `registered the code of ... for user 10` when
+  it acts, and the report lists those lines.
+- The direct way no longer asks the container's package service for the whole list of Google's screens
+  (on that phone the answer was 4.6 MB, more than one Android call can carry, so it always failed); it
+  reads the list from Google's package file instead.
+
+Not confirmed on the Lava yet. Whatever comes after Google's screen opens is still unknown on both phones.
+
+**The sign-in screen that "opened" and never appeared (build 42).** In the build 41 report from the Xiaomi
+Google's service answered, the app opened `com.google.android.gms.ui.UNPACKING_REDIRECT`, said so, and
+nothing appeared: no crash, and no error in any of Google's processes. Reading the engine shows why
+(found in the code; the phone has not confirmed it yet):
+
+- Google names that screen by an action only, with no component. The container's activity manager
+  finds such a screen by matching the intent against the intent filters of the installed screens, and
+  a filter only matches when it lists every category of the intent.
+- Since build 40 the app marks a launch of its own with a category (`bg_runner_from_host`; an extra
+  would make Android 12 and older read all of Google's extras, which fails on Google's own classes).
+  No filter lists that made-up category, so the match failed, the container found no screen, and it
+  dropped the request without a word. Before build 40 the marker was an extra and did not get in the way.
+
+Build 42:
+
+- tells the container which screen to open (the component the app had already found), so nothing has
+  to be matched. When the container cannot match a request at all it now writes a warning
+  (`startActivityLocked: no screen in space N answers ...`), so it can no longer happen silently.
+- records what happens next, because the earlier reports left all of it out: the report describes the
+  intent Google returned (the names of its extras only, never their values), notes what the phone
+  shows of this app (its tasks and how important each of its processes is) before the launch and
+  0.8, 2.5, 5 and 9 seconds after it, and has a new section, "Container launch lines after the sign-in
+  screen was opened", with the lines of the container's activity manager and screen start-up from every
+  process plus the warnings and errors of the processes that are not Google's (this app's own and the
+  account service's), which the report did not show before.
+- prints the names of the entries of Google's answer (it printed the identity of a set object).
+
+What the redirect screen does once it starts (it is meant to hand over to Google's own sign-in screen)
+is not known yet.
+
 **The Play Store record (builds after 35).** Google's own client code, which is inside every app that uses
 Play services, checks that the Play Store on the phone is the genuine one: it compares its signing
 certificate with Google's (log: `requires Google Play Store, but its signature is invalid`). The engine
@@ -329,6 +392,7 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/Bcore/src/main/java/.../fake/service/ICredentialManagerProxy.java` | Answers Android's Credential Manager (Sign in with Google picker, passkeys) with "no saved logins" inside the container; without it Android refuses with a SecurityException and Instagram closes ~10 s after it starts |
 | `overlay/Bcore/src/main/java/.../fake/frameworks/GoogleSignIn.java` | Starts "add a Google account" for one space, opens Google's sign-in screen in the container, follows the steps in the log, tries the direct way and builds the report |
 | `overlay/Bcore/src/main/java/.../fake/frameworks/AuthenticatorTap.java` | Sits in front of Google Play services' sign-in service inside the container: logs the request arriving, the error it ends with, and where it is stuck; passes the error on as the answer; runs a request again as the system when Android refused it for the account-manager permission |
+| `overlay/Bcore/src/main/java/.../fake/service/LoadedApkRegistry.java` | Keeps a virtual app's code (and its Application) in one piece when the container runs in a second Android user, which Android otherwise refuses to cache |
 | `overlay/app/src/main/java/.../view/gms/GoogleSignInDialogs.java` | The boxes around a sign-in: progress, "screen is open", and the reason with a report to copy |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalFolders.java` | Creates the folders an app expects on "phone storage" inside the container before it starts |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalVolumes.java` | Points the storage volumes Android reports to an app at the container's own folder |
@@ -340,5 +404,5 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/app/src/main/java/.../runner/KeepAliveService.java` | Foreground service with a partial wake lock |
 | `overlay/Bcore/.../StayActive.java` | Engine-side hook behind "Stay active in background" and the Java side of the mute |
 | `overlay/Bcore/src/main/cpp/BgMute/BgMute.cpp` | Native AudioTrack hook that mutes game audio in the background |
-| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources, among them the engine's `IActivityManagerProxy` (device-aware permission check, Android 15), `IUserManagerProxy` (app restrictions for a user, Android 15), `NativeCore` (calling user id for the retry as system) and `ActivityStack` (host-start markers) |
+| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources, among them the engine's `IActivityManagerProxy` (device-aware permission check, Android 15), `IUserManagerProxy` (app restrictions for a user, Android 15), `NativeCore` (calling user id for the retry as system), `ActivityStack` (host-start markers), `BActivityThread` and `HCallbackProxy` (app code kept in a second Android user) |
 | `.github/workflows/build-apk.yml` | Builds the APK on GitHub Actions |

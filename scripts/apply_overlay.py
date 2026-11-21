@@ -984,6 +984,52 @@ KEEP_PATCHES = [
     @ProxyMethod("getProfileParent")""",
         1,
     ),
+    (
+        # Google sign-in on a phone whose container app runs in a second Android user (a second
+        # space, a work profile, user 10): see LoadedApkRegistry. The engine tells Android that a
+        # virtual app's uid is only its app id (user 0), so Android never keeps the app's code
+        # ("LoadedApk") of a process that runs in another user. Services were then created with a
+        # context that had no Application, and screens were launched on a second copy of the code.
+        # Step 1: file the LoadedApk the engine built for the app under its package name.
+        "app/BActivityThread.java",
+        """        Object loadedApk = BRContextImpl.get(packageContext).mPackageInfo();
+""",
+        """        Object loadedApk = BRContextImpl.get(packageContext).mPackageInfo();
+        top.niunaijun.blackbox.fake.service.LoadedApkRegistry.register(packageName, loadedApk, applicationInfo);
+""",
+        1,
+    ),
+    (
+        # Step 2: when a screen is launched, hand Android the screen's info with the uid in this
+        # process's user, so the lookup of the app's code is not rejected as "different user" and
+        # finds the LoadedApk of step 1 (Android 13 and newer, and Android 9 to 11; Android 12 sets
+        # the code on the launch record itself).
+        "fake/service/HCallbackProxy.java",
+        """                launchActivityItemContext._set_mIntent(stubRecord.mTarget);
+                launchActivityItemContext._set_mInfo(activityInfo);
+""",
+        """                launchActivityItemContext._set_mIntent(stubRecord.mTarget);
+                launchActivityItemContext._set_mInfo(
+                        top.niunaijun.blackbox.fake.service.LoadedApkRegistry.forThisUser(activityInfo));
+""",
+        2,
+    ),
+    (
+        # A request the container's activity manager cannot match to any screen was dropped without
+        # a trace (Google's sign-in screen "opened" and nothing appeared). Say so in the log.
+        "core/system/am/ActivityStack.java",
+        """        if (resolveInfo == null || resolveInfo.activityInfo == null) {
+            return 0;
+        }
+""",
+        """        if (resolveInfo == null || resolveInfo.activityInfo == null) {
+            Log.w(TAG, "startActivityLocked: no screen in space " + userId + " answers "
+                    + top.niunaijun.blackbox.fake.service.NewIntentCompat.describe(intent) + ", nothing is started");
+            return 0;
+        }
+""",
+        1,
+    ),
 ]
 
 

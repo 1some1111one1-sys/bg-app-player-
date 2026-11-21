@@ -5,6 +5,7 @@ import android.accounts.AccountManager;
 import android.accounts.IAccountManagerResponse;
 import android.app.ActivityManager;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
@@ -72,6 +73,8 @@ public final class GoogleSignIn {
     private static final long ACCOUNT_SETTLE_MS = 20_000;
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    /** When, after the sign-in screen was opened, to write down what the phone shows of this app. */
+    private static final long[] SNAPSHOT_AT_MS = {800, 2500, 5000, 9000};
 
     /** Sign-in screens of Google Play services, tried one by one when the direct way is used. */
     private static final String[] DIRECT_SCREENS = {
@@ -254,6 +257,7 @@ public final class GoogleSignIn {
         private volatile boolean tapReturnedNoted;
         private volatile boolean tapStuckNoted;
         private int polls;
+        private int nextSnapshot;
         private String lastProgress = "";
         private int accountsBefore;
         private long accountSeenAt;
@@ -497,6 +501,12 @@ public final class GoogleSignIn {
                         return;
                     }
                 } else {
+                    long sinceOpen = SystemClock.elapsedRealtime() - openedAt;
+                    while (nextSnapshot < SNAPSHOT_AT_MS.length && sinceOpen >= SNAPSHOT_AT_MS[nextSnapshot]) {
+                        note(String.format(Locale.US, "%.1f s after the screen was opened, %s",
+                                SNAPSHOT_AT_MS[nextSnapshot] / 1000.0, describeHostScreens()));
+                        nextSnapshot++;
+                    }
                     if (elapsed >= nextAccountCheck) {
                         checkForAccount();
                         nextAccountCheck = elapsed + 2000;
@@ -543,7 +553,7 @@ public final class GoogleSignIn {
                     return;
                 }
                 // Only the names of the entries are logged, never their values.
-                Log.i(TAG, "Google sign-in from settings, answer holds " + value.keySet());
+                Log.i(TAG, "Google sign-in from settings, answer holds " + new ArrayList<String>(value.keySet()));
 
                 Intent screen = value.getParcelable(AccountManager.KEY_INTENT);
                 if (screen != null) {
@@ -637,11 +647,23 @@ public final class GoogleSignIn {
                 }
                 Log.i(TAG, "opening Google's sign-in screen " + target + " in space " + userId);
                 note("opening the sign-in screen " + target);
+                note("the intent Google returned: " + describeIntent(screen));
+                if (screen.getComponent() == null) {
+                    // Google names its screen by an action only. The container's activity manager finds
+                    // the screen again by that action, and it only accepts an intent whose categories
+                    // are all ones the screen's filter lists. The marker below is a category this
+                    // app made up, so without a component the container no longer found the screen and
+                    // dropped the request without a word: the screen "opened" and nothing appeared.
+                    screen.setComponent(new ComponentName(found.activityInfo.packageName, found.activityInfo.name));
+                    note("the container is told which screen to open: "
+                            + screen.getComponent().flattenToShortString());
+                }
                 screen.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 // Start it from this app (which is on screen) rather than through a running container app.
                 // The marker is a category, not an extra: the intent is Google's, and on Android 12 and
                 // older adding an extra opens all of its extras, which fails on Google's own classes.
                 screen.addCategory("bg_runner_from_host");
+                note("before the launch, " + describeHostScreens());
                 BlackBoxCore.getBActivityManager().startActivity(screen, userId);
                 markOpened();
             } catch (Throwable e) {
@@ -741,6 +763,117 @@ public final class GoogleSignIn {
             }
         }
 
+        // ------------------------------------------------------------------ what the phone shows
+
+        /**
+         * An intent in a few words, for the report. The values of its extras are never written (they
+         * can hold account names), only their names, and the extras are read from a copy: on
+         * Android 12 and older reading them can fail on Google's own classes, and must not touch the
+         * intent that is about to be started.
+         */
+        private String describeIntent(Intent intent) {
+            StringBuilder out = new StringBuilder();
+            try {
+                out.append("action ").append(intent.getAction());
+                if (intent.getComponent() != null) {
+                    out.append(", screen ").append(intent.getComponent().flattenToShortString());
+                }
+                if (intent.getPackage() != null) {
+                    out.append(", package ").append(intent.getPackage());
+                }
+                out.append(", flags 0x").append(Integer.toHexString(intent.getFlags()));
+                if (intent.getCategories() != null) {
+                    out.append(", categories ").append(new ArrayList<String>(intent.getCategories()));
+                }
+                try {
+                    Bundle extras = new Intent(intent).getExtras();
+                    out.append(", extras ").append(extras == null ? "none" : new ArrayList<String>(extras.keySet()));
+                } catch (Throwable e) {
+                    out.append(", extras could not be read here (").append(e.getClass().getSimpleName()).append(')');
+                }
+            } catch (Throwable e) {
+                out.append("(could not be described: ").append(e).append(')');
+            }
+            return out.toString();
+        }
+
+        /**
+         * What the phone shows of this app: its tasks (the container's screens are tasks of this app
+         * whose top screen is one of the engine's stand-in screens) and how important Android finds
+         * each of its processes (100 means one of its screens is in front).
+         */
+        private String describeHostScreens() {
+            StringBuilder out = new StringBuilder("the app's screens: ");
+            try {
+                ActivityManager am = (ActivityManager) BlackBoxCore.getContext()
+                        .getSystemService(Context.ACTIVITY_SERVICE);
+                List<ActivityManager.AppTask> tasks = am.getAppTasks();
+                if (tasks == null || tasks.isEmpty()) {
+                    out.append("no tasks");
+                } else {
+                    int count = 0;
+                    for (ActivityManager.AppTask task : tasks) {
+                        if (count++ >= 8) {
+                            out.append(" ...");
+                            break;
+                        }
+                        try {
+                            ActivityManager.RecentTaskInfo info = task.getTaskInfo();
+                            if (count > 1) {
+                                out.append(", ");
+                            }
+                            out.append('#').append(fieldOf(info, "id")).append(' ')
+                                    .append(componentText(fieldOf(info, "topActivity")))
+                                    .append(" x").append(fieldOf(info, "numActivities"));
+                        } catch (Throwable e) {
+                            out.append("(a task could not be read)");
+                        }
+                    }
+                }
+            } catch (Throwable e) {
+                out.append("tasks could not be read (").append(e.getClass().getSimpleName()).append(')');
+            }
+            out.append("; processes: ");
+            try {
+                ActivityManager am = (ActivityManager) BlackBoxCore.getContext()
+                        .getSystemService(Context.ACTIVITY_SERVICE);
+                List<ActivityManager.RunningAppProcessInfo> processes = am.getRunningAppProcesses();
+                if (processes == null || processes.isEmpty()) {
+                    out.append("none listed");
+                } else {
+                    int count = 0;
+                    for (ActivityManager.RunningAppProcessInfo process : processes) {
+                        if (count++ >= 10) {
+                            out.append(" ...");
+                            break;
+                        }
+                        if (count > 1) {
+                            out.append(", ");
+                        }
+                        out.append(process.processName).append('=').append(process.importance);
+                    }
+                }
+            } catch (Throwable e) {
+                out.append("could not be read (").append(e.getClass().getSimpleName()).append(')');
+            }
+            return out.toString();
+        }
+
+        private String componentText(Object value) {
+            if (value instanceof ComponentName) {
+                return ((ComponentName) value).flattenToShortString();
+            }
+            return String.valueOf(value);
+        }
+
+        private Object fieldOf(Object target, String name) {
+            try {
+                return target.getClass().getField(name).get(target);
+            } catch (Throwable e) {
+                return "?";
+            }
+        }
+
         // ------------------------------------------------------------------ the direct way
 
         /**
@@ -776,11 +909,22 @@ public final class GoogleSignIn {
             }
         }
 
-        private ComponentName findDirectScreen() {
-            BPackageManager pm = BlackBoxCore.getBPackageManager();
+        /**
+         * The names of the screens Google Play services declares, read from its package file. The
+         * container's package service must not be asked for the whole list: on one phone its answer
+         * was 4.6 MB, far over what Android lets one call carry, so the call always failed.
+         */
+        private List<String> screenNamesFromPackageFile() {
             List<String> names = new ArrayList<>();
             try {
-                PackageInfo info = pm.getPackageInfo(GmsCore.GMS_PKG, PackageManager.GET_ACTIVITIES, userId);
+                ApplicationInfo app = BlackBoxCore.getBPackageManager()
+                        .getApplicationInfo(GmsCore.GMS_PKG, 0, userId);
+                if (app == null || app.sourceDir == null) {
+                    note("Google Play services package file: not found");
+                    return names;
+                }
+                PackageInfo info = BlackBoxCore.getContext().getPackageManager()
+                        .getPackageArchiveInfo(app.sourceDir, PackageManager.GET_ACTIVITIES);
                 if (info != null && info.activities != null) {
                     for (ActivityInfo activity : info.activities) {
                         if (activity != null && activity.name != null) {
@@ -791,6 +935,12 @@ public final class GoogleSignIn {
             } catch (Throwable e) {
                 note("the list of Google's screens could not be read: " + e);
             }
+            return names;
+        }
+
+        private ComponentName findDirectScreen() {
+            BPackageManager pm = BlackBoxCore.getBPackageManager();
+            List<String> names = screenNamesFromPackageFile();
 
             // Which sign-in related screens exist, for the report.
             StringBuilder related = new StringBuilder();
@@ -818,8 +968,12 @@ public final class GoogleSignIn {
             }
             for (String name : DIRECT_SCREENS) {
                 ComponentName component = new ComponentName(GmsCore.GMS_PKG, name);
-                if (pm.getActivityInfo(component, 0, userId) != null) {
-                    return component;
+                try {
+                    if (pm.getActivityInfo(component, 0, userId) != null) {
+                        return component;
+                    }
+                } catch (Throwable e) {
+                    note("asking for " + shorten(name) + " failed: " + e);
                 }
             }
             return null;
@@ -1100,6 +1254,7 @@ public final class GoogleSignIn {
                 out.append("  ").append(clip(steps.get(i).raw, 320)).append('\n');
             }
             out.append(googleSide(window, steps));
+            out.append(launchSide(window, steps));
             if (!crashes.isEmpty()) {
                 out.append(crashes.size() <= 3
                         ? "Crashes in the container (" + crashes.size() + "):\n"
@@ -1206,6 +1361,87 @@ public final class GoogleSignIn {
             return out.toString();
         }
 
+        /** Tags of the container's own launch code: they say which screen was started, where, and why not. */
+        private boolean isLaunchTag(String tag) {
+            String t = tag.toLowerCase(Locale.US);
+            return t.equals("activitystack") || t.equals("appinstrumentation") || t.equals("hcallbackstub")
+                    || t.equals("proxyactivity") || t.equals("splashscreen") || t.equals("bprocessmanager")
+                    || t.equals("bactivitymanagerservice") || t.equals("loadedapkregistry");
+        }
+
+        /**
+         * What the container's own launch code wrote from the moment the sign-in screen was opened, from
+         * every process of the container: its activity manager and screen start-up lines (they say which
+         * screen was started, in which process, and whether anything was found for the request), and the
+         * warnings and errors of the processes that are not Google's (the account service's process and
+         * this app's own), which the section on Google's side does not cover.
+         */
+        private String launchSide(List<LogLine> window, List<LogLine> steps) {
+            long openedKey = 0;
+            for (LogLine step : steps) {
+                if (step.message.contains("opening the sign-in screen")
+                        || step.message.contains("opening Google's sign-in screen")) {
+                    openedKey = step.key;
+                    break;
+                }
+            }
+            if (openedKey == 0) {
+                return "";
+            }
+            Map<Integer, String> google = new LinkedHashMap<>();
+            int main = authPid > 0 ? authPid : pidFromSteps(steps);
+            if (main > 0) {
+                google.put(main, "");
+            }
+            addNames(google, namesFromSteps(steps));
+            addNames(google, googleProcesses());
+            addNames(google, crashedGoogleProcesses(window));
+
+            List<LogLine> picked = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            int left = 0;
+            for (LogLine line : window) {
+                if (line.key < openedKey - 500 || TAG.equals(line.tag) || "AndroidRuntime".equals(line.tag)) {
+                    continue;
+                }
+                boolean launch = isLaunchTag(line.tag);
+                boolean problem = (line.level == 'W' || line.level == 'E' || line.level == 'F')
+                        && !google.containsKey(line.pid) && !isLaunchNoise(line);
+                if (!launch && !problem) {
+                    continue;
+                }
+                if (!seen.add(line.pid + "|" + line.tag + "|" + clip(line.message, 90))) {
+                    continue;
+                }
+                if (picked.size() < 80) {
+                    picked.add(line);
+                } else {
+                    left++;
+                }
+            }
+            StringBuilder out = new StringBuilder();
+            out.append("Container launch lines after the sign-in screen was opened (every process; "
+                    + "the container's activity manager and screen start-up, and warnings and errors of the "
+                    + "processes that are not Google's):\n");
+            for (LogLine line : picked) {
+                out.append("  ").append(clip(line.raw, 230)).append('\n');
+            }
+            if (picked.isEmpty()) {
+                out.append("  (nothing: the container wrote no launch line, so the request may never have reached "
+                        + "its activity manager)\n");
+            }
+            if (left > 0) {
+                out.append("  (").append(left).append(" more lines were left out)\n");
+            }
+            return out.toString();
+        }
+
+        private boolean isLaunchNoise(LogLine line) {
+            String t = line.tag.toLowerCase(Locale.US);
+            return t.equals("libc") || t.equals("nativeloader") || t.equals("ziparchive") || t.equals("chromium")
+                    || t.equals("dex2oat") || t.startsWith("camera") || t.equals("hookmanager");
+        }
+
         /** Adds the processes of {@code more}; a name that is already known is kept, an empty one is filled in. */
         private void addNames(Map<Integer, String> into, Map<Integer, String> more) {
             for (Map.Entry<Integer, String> entry : more.entrySet()) {
@@ -1291,6 +1527,9 @@ public final class GoogleSignIn {
             boolean frame = text.startsWith("at ") || text.startsWith("...");
             if (line.tag.equals("nativeloader") || line.tag.equals("HookManager")) {
                 return 0;
+            }
+            if (line.tag.equals("LoadedApkRegistry")) {
+                return 4; // says whether the second-Android-user fix took effect
             }
             if (line.level == 'E' || line.level == 'F') {
                 return frame ? 2 : 5;
@@ -1390,7 +1629,8 @@ public final class GoogleSignIn {
             }
             String tag = line.tag.toLowerCase(Locale.US);
             if (tag.contains("auth") || tag.contains("chimera") || tag.contains("account")
-                    || tag.contains("binder") || tag.contains("signin") || tag.contains("gsf")) {
+                    || tag.contains("binder") || tag.contains("signin") || tag.contains("gsf")
+                    || tag.contains("loadedapk")) {
                 return true;
             }
             String text = line.message.toLowerCase(Locale.US);
