@@ -315,6 +315,49 @@ Build 42:
 What the redirect screen does once it starts (it is meant to hand over to Google's own sign-in screen)
 is not known yet.
 
+**Google's sign-in screen crashed asking Android who the user is (build 43).** The build 42 report from
+the Lava showed that the two fixes of build 42 worked as far as they went. Google's service answered,
+the app opened the redirect screen, the container started it (a screen of this app and a process for it
+appeared, 0.8 s later) and it handed on to Google's real sign-in screen, `AccountIntroActivity`. That
+screen then died within a second, again and again (14 crashes in 13 seconds), every time with:
+
+`SecurityException: You either need MANAGE_USERS, CREATE_USERS, or QUERY_USERS permission to: query user`
+
+thrown from `IUserManager.getUserInfo`. The same process also logged a caught
+`SecurityException ... to: check getProfileType` just before. The reason (read from the report and the
+engine's code; not confirmed on a phone yet):
+
+- Google Play services is a system app on a real phone and holds permissions an ordinary app does not.
+  Its sign-in screen asks Android's user service "who is this user" before it shows anything. Inside the
+  container the question comes from this app, which holds none of those permissions, so Android refuses.
+- The engine's stub in front of that service (`IUserManagerProxy`) only had four answers of its own and
+  passed everything else on, refusals included, straight into Google's code, which does not expect one.
+- `getProfileType` was asked about user 0 by a process that runs in user 10; Android only answers that
+  across users. The Xiaomi (user 0) would meet the first refusal as soon as its screen starts.
+
+Build 43 (`UserServiceAnswers`, called from a new `invoke` in `IUserManagerProxy`):
+
+- the stub still asks Android first. When Android refuses a **question** (a method called `get...`,
+  `is...`, `has...`, `can...`) with a SecurityException, the container answers it instead, the way a
+  phone nobody manages does: `getUserInfo` gives an ordinary full user (the owner, administrator, not
+  restricted, not a guest, not a work profile) with the id that was asked for, `getProfileType` says
+  "full user", `isUserUnlocked` says yes, `hasUserRestriction`, `isManagedProfile` and the like say no,
+  `getProfileIds` and `getProfiles` name only the user itself, a count or time is 0, a list is empty.
+- a refusal is remembered per question, so Android is not asked again for the same thing. The log gets
+  one line per method: `user service: the system refused getUserInfo (...), the container answers it
+  itself`, which the report lists with the sign-in steps.
+- a **change** (`set...`, `create...`, `remove...`) that Android refuses stays refused, and every other
+  kind of failure is passed on unchanged. Nothing changes for a call Android answers, or outside the
+  container's own processes. On Android 10 to 15 the user record is built the same way (the flags that
+  Android 11 added are not used, because the record's constructor refuses some of them); if a phone's
+  constructor still refuses, plainer flags are tried and, last, no record is given.
+- the crash part of the report leaves out Android's plumbing frames (`Parcel`, binder and reflection
+  proxies, the engine's call stub) and keeps nine frames after each "Caused by" instead of six. In the
+  build 42 report all six went to those frames, so the frames of Google's own code that asked were never
+  shown.
+
+Whatever Google's sign-in screen does next (it loads a web page with the sign-in form) is not known yet.
+
 **The Play Store record (builds after 35).** Google's own client code, which is inside every app that uses
 Play services, checks that the Play Store on the phone is the genuine one: it compares its signing
 certificate with Google's (log: `requires Google Play Store, but its signature is invalid`). The engine
@@ -393,6 +436,7 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/Bcore/src/main/java/.../fake/frameworks/GoogleSignIn.java` | Starts "add a Google account" for one space, opens Google's sign-in screen in the container, follows the steps in the log, tries the direct way and builds the report |
 | `overlay/Bcore/src/main/java/.../fake/frameworks/AuthenticatorTap.java` | Sits in front of Google Play services' sign-in service inside the container: logs the request arriving, the error it ends with, and where it is stuck; passes the error on as the answer; runs a request again as the system when Android refused it for the account-manager permission |
 | `overlay/Bcore/src/main/java/.../fake/service/LoadedApkRegistry.java` | Keeps a virtual app's code (and its Application) in one piece when the container runs in a second Android user, which Android otherwise refuses to cache |
+| `overlay/Bcore/src/main/java/.../fake/service/UserServiceAnswers.java` | Answers the questions Android's user service refuses a virtual app (who is this user, which profile type, is it restricted) so Google's sign-in screen does not crash on the refusal; used by `IUserManagerProxy` |
 | `overlay/app/src/main/java/.../view/gms/GoogleSignInDialogs.java` | The boxes around a sign-in: progress, "screen is open", and the reason with a report to copy |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalFolders.java` | Creates the folders an app expects on "phone storage" inside the container before it starts |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalVolumes.java` | Points the storage volumes Android reports to an app at the container's own folder |
@@ -404,5 +448,5 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/app/src/main/java/.../runner/KeepAliveService.java` | Foreground service with a partial wake lock |
 | `overlay/Bcore/.../StayActive.java` | Engine-side hook behind "Stay active in background" and the Java side of the mute |
 | `overlay/Bcore/src/main/cpp/BgMute/BgMute.cpp` | Native AudioTrack hook that mutes game audio in the background |
-| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources, among them the engine's `IActivityManagerProxy` (device-aware permission check, Android 15), `IUserManagerProxy` (app restrictions for a user, Android 15), `NativeCore` (calling user id for the retry as system), `ActivityStack` (host-start markers), `BActivityThread` and `HCallbackProxy` (app code kept in a second Android user) |
+| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources, among them the engine's `IActivityManagerProxy` (device-aware permission check, Android 15), `IUserManagerProxy` (app restrictions for a user, Android 15; answers to questions Android refuses), `NativeCore` (calling user id for the retry as system), `ActivityStack` (host-start markers), `BActivityThread` and `HCallbackProxy` (app code kept in a second Android user) |
 | `.github/workflows/build-apk.yml` | Builds the APK on GitHub Actions |

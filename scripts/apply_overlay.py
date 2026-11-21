@@ -1030,6 +1030,49 @@ KEEP_PATCHES = [
 """,
         1,
     ),
+    (
+        # Google sign-in, the crash after the screen finally opened (build 42 report from the Lava):
+        # Google's sign-in screen (AccountIntroActivity) died while it started, over and over, with
+        # "SecurityException: You either need MANAGE_USERS, CREATE_USERS, or QUERY_USERS permission to:
+        # query user", thrown by IUserManager.getUserInfo through the engine's user-service stub, which
+        # passed the call on. Google Play services is a system app on a real phone and may ask Android's
+        # user service such things; inside the container the call comes from this app, which may not.
+        # (A second one, "check getProfileType", was asked for user 0 from a process of user 10.)
+        # Keep asking the system first; when it refuses a question (get..., is..., has..., can...) with
+        # a SecurityException, answer from UserServiceAnswers (an ordinary, unrestricted owner user) and
+        # remember the refusal. A refused change (set..., create..., remove...) stays refused.
+        "fake/service/IUserManagerProxy.java",
+        """    public boolean isBadEnv() {
+        return false;
+    }
+""",
+        """    public boolean isBadEnv() {
+        return false;
+    }
+
+    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        if (!BlackBoxCore.get().isBlackProcess()) {
+            return super.invoke(proxy, method, args);
+        }
+        String key = UserServiceAnswers.keyOf(method, args);
+        if (UserServiceAnswers.isRefused(key)) {
+            return UserServiceAnswers.answer(method, args);
+        }
+        try {
+            return super.invoke(proxy, method, args);
+        } catch (Throwable e) {
+            SecurityException refusal = UserServiceAnswers.refusalIn(e);
+            if (refusal == null || !UserServiceAnswers.isQuery(method)) {
+                throw e;
+            }
+            UserServiceAnswers.noteRefused(key, method, refusal);
+            return UserServiceAnswers.answer(method, args);
+        }
+    }
+""",
+        1,
+    ),
 ]
 
 

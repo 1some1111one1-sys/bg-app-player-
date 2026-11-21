@@ -1293,7 +1293,7 @@ public final class GoogleSignIn {
                 } else if (text.startsWith("Caused by:")) {
                     out.add(clip(line.raw, 700));
                     frames = 0;
-                    framesAllowed = 6;
+                    framesAllowed = 9;
                 } else if (text.startsWith("at ")) {
                     if (frames < framesAllowed && !isPlumbing(text)) {
                         out.add(clip(line.raw, 230));
@@ -1306,11 +1306,19 @@ public final class GoogleSignIn {
             return out;
         }
 
+        /**
+         * Frames of Android's own message and call plumbing, which say nothing about what failed. The
+         * build 42 report showed a refusal by Android's user service with only these frames and the
+         * container's call stub in the lines it kept, so the frames of Google's code that made the call
+         * (the ones worth reading) were never reached.
+         */
         private boolean isPlumbing(String frame) {
             return frame.contains("android.app.ActivityThread") || frame.contains("android.os.Handler")
                     || frame.contains("android.os.Looper") || frame.contains("com.android.internal.os")
                     || frame.contains("java.lang.reflect") || frame.contains("android.app.servertransaction")
-                    || frame.contains("dalvik.system");
+                    || frame.contains("dalvik.system") || frame.contains("android.os.Parcel.")
+                    || frame.contains("jdk.internal.reflect") || frame.contains(" $Proxy") || frame.contains(".$Proxy")
+                    || frame.contains("top.niunaijun.blackbox.fake.hook.ClassInvocationStub");
         }
 
         /**
