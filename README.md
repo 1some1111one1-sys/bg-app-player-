@@ -358,6 +358,74 @@ Build 43 (`UserServiceAnswers`, called from a new `invoke` in `IUserManagerProxy
 
 Whatever Google's sign-in screen does next (it loads a web page with the sign-in form) is not known yet.
 
+**Play Store and Play services closing, and "problem communicating with Google servers" (build 44).** The
+build 43 report from the Xiaomi (Android 15) shows what happens, and this part is confirmed by the log:
+Google Play Store died a few seconds after it started, over and over (seven processes in 20 seconds),
+with `Fatal signal 5 (SIGTRAP)` in a thread called `CronetInit`, and Google Play services died in the
+same thread with a Java crash (three times). Cronet is Chrome's network library, which both apps use for everything
+they send, so the part of Play services that talks to Google was dead when the sign-in screen said "checking
+info", and then "problem communicating with Google servers". The line that starts it, every time:
+
+`SecurityException: Requires one of the following permissions: android.permission.ACCESS_DOWNLOAD_MANAGER,
+android.permission.NETWORK_STACK, android.permission.MAINLINE_NETWORK_STACK` thrown from
+`ConnectivityManager.getNetworkInfoForUid`.
+
+The reason (read from the report and Android's code; not confirmed on a phone yet): when Cronet starts it asks
+Android about each network with `getNetworkInfo(network)`, and that hands Android the app's own uid. Inside the
+container a virtual app is told that its uid is a made-up one (10003 for Play Store, 10004 for Play services),
+but to Android all virtual apps are this one app with this app's real uid. Android 14 and 15 only answer a
+question about some other uid to an app with the download manager's or the network stack's permissions, so the
+system threw into Cronet's start-up, and Cronet aborts the whole process on an exception there. GTA and
+Instagram do not use Cronet this way, which is why they were fine.
+
+The same report shows a second problem that is probably why Play Store could not sign in even when it stayed
+up: its first questions to Google's services provider (the one that holds the device id) were all refused with
+`Calling uid: 10493 doesn't match source uid: 10003`, and the next lines are `Unexpected android-id = 0` and
+`Unable to fetch checkin consistency token`. Since Android 12 every call to a content provider carries who is
+asking (an `AttributionSource`: a uid and a package name) and the provider's process compares that uid with the
+real caller's. The engine tried to correct it with field names that do not exist on Android 12 and newer, so
+it corrected nothing, and it answered the refusal with an empty result. (The same report shows Play Store's
+start-up stopping half way after that and parts of the app failing later with `Cannot cast ... to ...`; that is
+expected to be a consequence, not a separate fault.)
+
+And on the Lava (user 10) Google Play services crashed right after it started because it broadcast to Android
+user 0, which Android refuses; the engine's handler for that refusal ran the call twice and then let the app
+crash with it.
+
+Build 44:
+
+- `NetworkInfoForUid` (a new hook for `getNetworkInfoForUid` in `IConnectivityManagerProxy`): when the uid in
+  the call is the virtual app's own made-up one, Android is asked with the real uid, which is what an ordinary
+  app does. If Android still refuses, the app is told there is a connected Wi-Fi network instead of getting the
+  exception. A question about any other uid is passed on as it is. Log: `BlackBoxNetwork: getNetworkInfoForUid:
+  asking Android as uid ... instead of the virtual app's uid ...`.
+- `RealProviderSource` (called at the top of `ContentProviderStub.invoke`): on Android 12 and newer a call to a
+  provider of the real system (Google's providers) gets its `AttributionSource` set to this app's real uid and
+  package name, with the helper (`ContextCompat.fixAttributionSourceState`) that the wrapper around the
+  settings, media and telephony providers already used. Providers of virtual apps are not touched. Android 11
+  and older have no attribution source and are not touched. Log: `BlackBoxProvider: calls to providers of the
+  real system now carry this app's uid and package name`.
+- `CallingGuest` (new per-call caller lookup in `NativeCore`, with `getBUidByPid` added at the end of the
+  container's activity-service interface): the receiving process of a call from one virtual app to another used
+  the app that happened to start that process as the caller of every call, so Play services (started by Play
+  Store) saw its own other processes as Play Store and refused them (`Package com.google.android.gms does not
+  belong to uid=10003`). It now asks the container's service which virtual app runs the calling process (by the
+  real process id Android reports) and remembers the answer for a minute. An unknown caller gets the old answer.
+  While a binder thread reads the `AttributionSource` of an incoming call (Android 12 and newer), the caller is
+  reported as the system, which passes Android's check; the provider of one virtual app was refusing the calls
+  of another with `Calling uid: 10003 doesn't match source uid: 10493`. Log: `BlackBoxCaller: calls from other
+  virtual apps are now told apart by the caller's process`.
+- `ActivityServiceAnswers` (wraps `IActivityManagerProxy.invoke`): a refusal of Android's activity service,
+  bare or wrapped in a reflection exception, is answered once with the "nothing happened" value of the type
+  the method returns (0, false, null); a wrong-typed answer is replaced the same way. The broadcast hook now
+  maps every Android user other than the app's own to the app's own, so the broadcast that Play services sent
+  to user 0 from user 10 is no longer refused.
+
+Not fixed yet (seen in the same report, expected to be harmless or later work): Play Store's `addAccount` call is
+refused with "Only 0p apps are allowed to call this API" (Google's service identifies the caller by the real
+uid), Play Store's install-session questions get package mismatches, and Firebase says the INTERNET permission
+is missing. If sign-in still fails after this build, the in-app sign-in report is what shows where.
+
 **The Play Store record (builds after 35).** Google's own client code, which is inside every app that uses
 Play services, checks that the Play Store on the phone is the genuine one: it compares its signing
 certificate with Google's (log: `requires Google Play Store, but its signature is invalid`). The engine
@@ -437,6 +505,11 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/Bcore/src/main/java/.../fake/frameworks/AuthenticatorTap.java` | Sits in front of Google Play services' sign-in service inside the container: logs the request arriving, the error it ends with, and where it is stuck; passes the error on as the answer; runs a request again as the system when Android refused it for the account-manager permission |
 | `overlay/Bcore/src/main/java/.../fake/service/LoadedApkRegistry.java` | Keeps a virtual app's code (and its Application) in one piece when the container runs in a second Android user, which Android otherwise refuses to cache |
 | `overlay/Bcore/src/main/java/.../fake/service/UserServiceAnswers.java` | Answers the questions Android's user service refuses a virtual app (who is this user, which profile type, is it restricted) so Google's sign-in screen does not crash on the refusal; used by `IUserManagerProxy` |
+| `overlay/Bcore/src/main/java/.../fake/service/NetworkInfoForUid.java` | Asks Android about a network with the app's real uid instead of the virtual app's made-up one, so Cronet (Play Store, Play services) no longer aborts on Android 14 and 15; used by a new hook in `IConnectivityManagerProxy` |
+| `overlay/Bcore/src/main/java/.../fake/service/RealProviderSource.java` | Gives the `AttributionSource` of a call to a provider of the real system (Google's) the app's real uid and package name on Android 12 and newer, so Play Store can read the device id; called from `ContentProviderStub` |
+| `overlay/Bcore/src/main/java/.../fake/service/CallingGuest.java` | Finds which virtual app made a call from another virtual app (by the caller's real process id) and lets the check of an incoming `AttributionSource` pass; used by `NativeCore` |
+| `overlay/Bcore/src/main/java/.../fake/service/ActivityServiceAnswers.java` | Answers a refusal of Android's activity service once, with the default of the method's return type; used by `IActivityManagerProxy` |
+| `overlay/Bcore/src/main/aidl/.../core/system/am/IBActivityManagerService.aidl` | The engine's file plus `getBUidByPid` at the end (which virtual app runs this real process), answered by `BActivityManagerService` |
 | `overlay/app/src/main/java/.../view/gms/GoogleSignInDialogs.java` | The boxes around a sign-in: progress, "screen is open", and the reason with a report to copy |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalFolders.java` | Creates the folders an app expects on "phone storage" inside the container before it starts |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalVolumes.java` | Points the storage volumes Android reports to an app at the container's own folder |
@@ -448,5 +521,5 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/app/src/main/java/.../runner/KeepAliveService.java` | Foreground service with a partial wake lock |
 | `overlay/Bcore/.../StayActive.java` | Engine-side hook behind "Stay active in background" and the Java side of the mute |
 | `overlay/Bcore/src/main/cpp/BgMute/BgMute.cpp` | Native AudioTrack hook that mutes game audio in the background |
-| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources, among them the engine's `IActivityManagerProxy` (device-aware permission check, Android 15), `IUserManagerProxy` (app restrictions for a user, Android 15; answers to questions Android refuses), `NativeCore` (calling user id for the retry as system), `ActivityStack` (host-start markers), `BActivityThread` and `HCallbackProxy` (app code kept in a second Android user) |
+| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources, among them the engine's `IActivityManagerProxy` (device-aware permission check, Android 15), `IUserManagerProxy` (app restrictions for a user, Android 15; answers to questions Android refuses), `NativeCore` (calling user id for the retry as system; calling virtual app per call; attribution check), `ContentProviderStub` and `IConnectivityManagerProxy` (build 44), `ActivityStack` (host-start markers), `BActivityThread` and `HCallbackProxy` (app code kept in a second Android user) |
 | `.github/workflows/build-apk.yml` | Builds the APK on GitHub Actions |

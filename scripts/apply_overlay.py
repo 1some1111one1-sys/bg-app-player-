@@ -603,9 +603,12 @@ KEEP_PATCHES = [
         }
 
         int getIntentIndex(Object[] args) {""",
-        """            // Apps may not broadcast to "all users" (the copied Google services do, and crashed).
+        """            // A container lives in the one Android user it runs in. Apps may not broadcast to "all
+            // users" (-1, the copied Google services do) or to another user (user 0 when the container
+            // app runs in user 10, which Google Play services also does): Android refuses both with a
+            // SecurityException that used to crash the app. The user is always the one this app runs in.
             if (args.length > 0 && args[args.length - 1] instanceof Integer
-                    && ((Integer) args[args.length - 1]) == -1) {
+                    && ((Integer) args[args.length - 1]).intValue() != BlackBoxCore.getHostUserId()) {
                 args[args.length - 1] = BlackBoxCore.getHostUserId();
             }
             return method.invoke(who, args);
@@ -1071,6 +1074,140 @@ KEEP_PATCHES = [
         }
     }
 """,
+        1,
+    ),
+    (
+        # Google Play Store and Google Play services closed a few seconds after they started, on
+        # Android 14 and 15, and Google's sign-in screen ended in "problem communicating with Google
+        # servers". Chrome's network code in them asks Android about each network with
+        # ConnectivityManager.getNetworkInfo(Network), which hands over the caller's own uid. A virtual
+        # app is told its uid is a made-up one, Android 14 and 15 refuse a question about any uid but the
+        # caller's own (to callers without the download manager's or the network stack's permissions),
+        # and Chrome aborts the process when its start-up throws. NetworkInfoForUid asks with the real
+        # uid, which is what an ordinary app does; if Android still refuses, the app is told there is a
+        # connected network instead of being crashed. Older Android never refused this, and for them the
+        # call is unchanged.
+        "fake/service/IConnectivityManagerProxy.java",
+        """    @ProxyMethod("getActiveNetworkInfoForUid")""",
+        """    @ProxyMethod("getNetworkInfoForUid")
+    public static class GetNetworkInfoForUid extends MethodHook {
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            try {
+                return NetworkInfoForUid.ask(who, method, args);
+            } catch (SecurityException refused) {
+                Slog.w(TAG, "getNetworkInfoForUid refused by the system (" + refused.getMessage()
+                        + "), answering with a connected network");
+                return createNetworkInfo(ConnectivityManager.TYPE_WIFI, 0, "WIFI", "");
+            }
+        }
+    }
+
+    @ProxyMethod("getActiveNetworkInfoForUid")""",
+        1,
+    ),
+    (
+        # Google Play services crashed at start on a phone whose container app runs in a second Android
+        # user: it broadcast to user 0, Android refused with a SecurityException, the hook that sent the
+        # broadcast made the call itself so the refusal came wrapped in an InvocationTargetException,
+        # the engine's own handler (it only knew the bare exception) ran the whole call a second time and
+        # then let the app crash. A refusal, bare or wrapped, is now answered once, with the "nothing
+        # happened" value of the type the method returns (the engine also answered "false" for methods
+        # that return a number and "null" for ones that return a primitive, which crash on their own).
+        # The first part renames the engine's handler and wraps it; the second keeps it from running the
+        # call again after a refusal.
+        "fake/service/IActivityManagerProxy.java",
+        """    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        try {
+            return super.invoke(proxy, method, args);
+        } catch (SecurityException e) {""",
+        """    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        try {
+            return ActivityServiceAnswers.fit(method, invokeOnce(proxy, method, args));
+        } catch (Throwable e) {
+            if (ActivityServiceAnswers.isRefusal(e)) {
+                Slog.w(TAG, "ActivityManager invoke: the system refused " + method.getName()
+                        + ", answering with the default of its type");
+                return ActivityServiceAnswers.defaultFor(method);
+            }
+            throw e;
+        }
+    }
+
+    private Object invokeOnce(Object proxy, Method method, Object[] args) throws Throwable {
+        try {
+            return super.invoke(proxy, method, args);
+        } catch (SecurityException e) {""",
+        1,
+    ),
+    (
+        "fake/service/IActivityManagerProxy.java",
+        """            Slog.e(TAG, "ActivityManager invoke: Unexpected error in " + method.getName(), e);
+            return super.invoke(proxy, method, args);""",
+        """            Slog.e(TAG, "ActivityManager invoke: Unexpected error in " + method.getName(), e);
+            if (ActivityServiceAnswers.isRefusal(e)) {
+                throw e;
+            }
+            return super.invoke(proxy, method, args);""",
+        1,
+    ),
+    (
+        # Who is calling, for a call from one virtual app to another (see CallingGuest): the engine told
+        # the receiving process that every caller is the app that happened to start that process, so
+        # Google Play services (started by Play Store) saw its own other processes as Play Store and
+        # refused them ("Package com.google.android.gms does not belong to uid=10003"). The receiver now
+        # asks the container's service which virtual app runs the calling process. Second, a call that
+        # carries an AttributionSource (every content provider call, Android 12 and newer) is checked
+        # against the caller's uid while it is read, and the uid in it is not the one the container
+        # reports, so the providers of one virtual app refused the calls of another (Play services
+        # answering Play Store); while that check runs, the caller is reported as the system, which
+        # passes it. (Calls to providers of the real system are corrected on the sending side, below.)
+        "core/NativeCore.java",
+        """            if (origCallingUid == BlackBoxCore.getHostUid()) {""",
+        """            if (origCallingUid == BlackBoxCore.getHostUid()) {
+                if (top.niunaijun.blackbox.fake.service.CallingGuest.insideAttributionCheck()) {
+                    return Process.SYSTEM_UID;
+                }""",
+        1,
+    ),
+    (
+        "core/NativeCore.java",
+        """                    int callingBUid = BlackBoxCore.getCallingBUid();""",
+        """                    int exactBUid = top.niunaijun.blackbox.fake.service.CallingGuest.uidOfCaller();
+                    int callingBUid = exactBUid > 0 ? exactBUid : BlackBoxCore.getCallingBUid();""",
+        1,
+    ),
+    (
+        # The container's service answers the lookup above: which virtual app runs this real process.
+        "core/system/am/BActivityManagerService.java",
+        """    private UserSpace getOrCreateSpaceLocked(int userId) {""",
+        """    @Override
+    public int getBUidByPid(int pid) throws RemoteException {
+        try {
+            ProcessRecord record = BProcessManagerService.get().findProcessByPid(pid);
+            return record == null ? -1 : record.buid;
+        } catch (Throwable e) {
+            // the list of processes changed while it was read: this lookup is only a help, so no error
+            return -1;
+        }
+    }
+
+    private UserSpace getOrCreateSpaceLocked(int userId) {""",
+        1,
+    ),
+    (
+        # Android 12 and newer: a call to a provider of the real system (Google's providers) carries an
+        # AttributionSource whose uid must be the real caller's. The engine's wrapper tried to correct it
+        # with field names that do not exist there, so it corrected nothing, Google's provider refused
+        # every call ("Calling uid: 10493 doesn't match source uid: 10003") and the wrapper answered with
+        # an empty result: Google Play Store never read its device id ("Unexpected android-id = 0").
+        # RealProviderSource corrects the source with the helper the settings wrapper already uses.
+        "fake/service/context/providers/ContentProviderStub.java",
+        """        String methodName = method.getName();""",
+        """        top.niunaijun.blackbox.fake.service.RealProviderSource.fix(mAppPkg, args);
+        String methodName = method.getName();""",
         1,
     ),
 ]
