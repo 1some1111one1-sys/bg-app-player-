@@ -19,6 +19,12 @@ import java.util.TreeMap;
  * container's (and this app's own screens, which are idle during a sign-in).
  */
 public final class SignInDiagnostics {
+    /**
+     * The number of the build (the release "build-N" the APK came from). The app has no other visible version
+     * number, so a pasted report could not say which build wrote it. Raise it with every release.
+     */
+    public static final int BUILD = 46;
+
     private SignInDiagnostics() {
     }
 

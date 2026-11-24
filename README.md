@@ -473,6 +473,46 @@ container or the browser) and what it tried to reach; the reports above are mean
 the properties of the phone that native Google code sees (a Pixel 6 with Android 12), Play Store's install-session
 questions, `hasFeatures`, Firebase's "missing INTERNET permission".
 
+**Play Store says "Authentication is required" (build 46).** After build 45 the Xiaomi's Play Store still opens
+with "Authentication is required. You need to sign in to your Google Account" and a "Try again" button. That
+screen is what Play Store shows when its request for a login token fails, and from the outside it looks the same
+whether Google refused the request, answered with a sign-in screen, or was never asked. No log of it was
+available, so the cause is not known. This build fixes one bug of the container that can produce it and adds the
+log lines that tell those cases apart; the fix is not confirmed on a phone.
+
+Build 46:
+
+- `invalidateAuthToken` (engine patch in `BAccountManagerService`): the usual way for an app to recover from an
+  expired or refused token is to call `invalidateAuthToken` with it and ask again. The container removed the
+  token from the account's user data instead of from its saved tokens, so for an authenticator whose tokens the
+  container keeps itself, the old token was served again for ever. The token is now removed from the saved tokens
+  (the in-memory cache of tokens was already handled). If Google Play services keeps its own tokens (the log line
+  says which), this was not the cause.
+- "Every account" (`getAccounts` hook added to `IAccountManagerProxy`): `AccountManager.getAccounts()` is its
+  own call of Android's account service (`getAccounts(type, package)`), not a `getAccountsAsUser`. The engine
+  hooked the typed calls but not this one, so it went to the phone's real account service and an app in the
+  container was told about the accounts of the phone itself instead of the ones in the container. Which accounts
+  that was depends on the phone: none on a phone without a Google account, the person's own on a phone that has
+  one. It is now answered by the container's account service like the others (empty list if that fails, never
+  the phone's accounts). This is one place where two phones can differ although the container is the same; it
+  is not confirmed that Play Store uses this call.
+- `TokenRequestNotes` (called from `getAuthToken` of the container's account service): for each request for a
+  login token one line says who asked (the app), for which token type, which uid was sent to Google Play services,
+  whether Google keeps its own tokens or the container does, whether a token of that type is saved, and what the
+  container holds for the account: no master token or its length, how many data keys and saved tokens (names of
+  the keys and token types only), and how long ago the last sign-in was. A second line says what Google answered:
+  a token (its length only), a screen to show instead (which screen and action), an error (code and message), or
+  nothing usable (the names of the keys). Each kind of line is written the first 3 times and then every 25th time.
+  No account name, token or value is written. Log: `token request: app ...` and `token request of ... answered: ...`
+  (tag `BlackBoxAccounts`).
+- The debug log and the sign-in report now start with the build number (`SignInDiagnostics.BUILD`), the debug
+  header lists the account types in the space as counts (`accountTypesInContainer=com.google x1`), and the debug
+  log keeps lines that contain `GetToken`, `AuthFailure`, `Only 0p` or `Authentication is required`.
+
+What the new lines are for: no `token request` line after Play Store opens means Play Store never asked the
+container (it takes the token another way); a request with `answered: a token` means Google gave a token and the
+refusal comes later, from Play Store's own server; `a screen to show instead` or an error says what Google wants.
+
 **The Play Store record (builds after 35).** Google's own client code, which is inside every app that uses
 Play services, checks that the Play Store on the phone is the genuine one: it compares its signing
 certificate with Google's (log: `requires Google Play Store, but its signature is invalid`). The engine
@@ -559,7 +599,8 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/Bcore/src/main/java/.../core/system/accounts/AuthenticatorCaller.java` | The uid the account service puts into a request to Google Play services: the one the asking virtual app has inside the container (build 45) |
 | `overlay/Bcore/src/main/java/.../fake/service/DevicePolicyCaller.java` | Gives a device policy question the package Android 15 expects, and answers a refused question with "nothing" (build 45); used by `IDevicePolicyManagerProxy` |
 | `overlay/Bcore/src/main/java/.../fake/service/LaunchNotes.java` | Writes a launch that leaves the container into the log without any private value (build 45); used by `ExternalLinks` |
-| `overlay/Bcore/src/main/java/.../fake/frameworks/SignInDiagnostics.java` | Network bytes during a sign-in and account counts by type, for the report (build 45) |
+| `overlay/Bcore/src/main/java/.../fake/frameworks/SignInDiagnostics.java` | Network bytes during a sign-in and account counts by type, for the report (build 45); the build number shown in the reports (build 46) |
+| `overlay/Bcore/src/main/java/.../core/system/accounts/TokenRequestNotes.java` | The log lines about a request for a login token and what Google answered, without names or values (build 46); used by `BAccountManagerService` |
 | `overlay/Bcore/src/main/aidl/.../core/system/am/IBActivityManagerService.aidl` | The engine's file plus `getBUidByPid` at the end (which virtual app runs this real process), answered by `BActivityManagerService` |
 | `overlay/app/src/main/java/.../view/gms/GoogleSignInDialogs.java` | The boxes around a sign-in: progress, "screen is open", and the reason with a report to copy |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalFolders.java` | Creates the folders an app expects on "phone storage" inside the container before it starts |
@@ -572,5 +613,5 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/app/src/main/java/.../runner/KeepAliveService.java` | Foreground service with a partial wake lock |
 | `overlay/Bcore/.../StayActive.java` | Engine-side hook behind "Stay active in background" and the Java side of the mute |
 | `overlay/Bcore/src/main/cpp/BgMute/BgMute.cpp` | Native AudioTrack hook that mutes game audio in the background |
-| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources, among them the engine's `IActivityManagerProxy` (device-aware permission check, Android 15), `IUserManagerProxy` (app restrictions for a user, Android 15; answers to questions Android refuses), `NativeCore` (calling user id for the retry as system; calling virtual app per call; attribution check), `ContentProviderStub` and `IConnectivityManagerProxy` (build 44), `BAccountManagerService` (all accounts; caller uid), `IDevicePolicyManagerProxy` and `ActivityManagerCommonProxy` (build 45), `ActivityStack` (host-start markers), `BActivityThread` and `HCallbackProxy` (app code kept in a second Android user) |
+| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources, among them the engine's `IActivityManagerProxy` (device-aware permission check, Android 15), `IUserManagerProxy` (app restrictions for a user, Android 15; answers to questions Android refuses), `NativeCore` (calling user id for the retry as system; calling virtual app per call; attribution check), `ContentProviderStub` and `IConnectivityManagerProxy` (build 44), `BAccountManagerService` (all accounts; caller uid; token lines; removal of an invalidated token), `IAccountManagerProxy` (the "every account" call, build 46), `IDevicePolicyManagerProxy` and `ActivityManagerCommonProxy` (build 45), `ActivityStack` (host-start markers), `BActivityThread` and `HCallbackProxy` (app code kept in a second Android user) |
 | `.github/workflows/build-apk.yml` | Builds the APK on GitHub Actions |

@@ -1333,7 +1333,9 @@ public class RunnerActivity extends Activity {
             "ExternalFolders", "Failed to ensure", "ICredentialManager",
             // Google sign-in
             "IAccountManagerProxy", "GoogleSignatureVerifier", "GooglePlayServicesUtil", "GoogleApiManager",
-            "Not allowed to bind", "GLSActivity", "GLSUser", "GoogleAuth"};
+            "Not allowed to bind", "GLSActivity", "GLSUser", "GoogleAuth",
+            // Play Store's login token (build 46): who asks for it and what Google answers
+            "GetToken", "AuthFailure", "Only 0p", "Authentication is required"};
 
     /** Lines that are never collapsed as repeats: they are the story of a crash or of a start-up. */
     private static final String[] LOG_NEVER_HIDE = {
@@ -1469,7 +1471,9 @@ public class RunnerActivity extends Activity {
                 }
 
                 final StringBuilder text = new StringBuilder();
-                text.append("BG App Runner log, Android ").append(Build.VERSION.RELEASE)
+                text.append("BG App Runner log (build ")
+                        .append(top.niunaijun.blackbox.fake.frameworks.SignInDiagnostics.BUILD)
+                        .append("), Android ").append(Build.VERSION.RELEASE)
                         .append(", ").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
                         .append(", 64-bit host: ").append(BlackBoxCore.is64Bit()).append('\n')
                         .append(diagnostics()).append("\n\n")
@@ -1518,9 +1522,15 @@ public class RunnerActivity extends Activity {
                 android.os.IBinder accountBinder = BlackBoxCore.get().getService(
                         top.niunaijun.blackbox.core.system.ServiceManager.ACCOUNT_MANAGER);
                 if (accountBinder != null) {
-                    int googleAccounts = top.niunaijun.blackbox.core.system.accounts.IBAccountManagerService.Stub
-                            .asInterface(accountBinder).getAccountsAsUser("com.google", USER_ID).length;
-                    d.append("googleAccountsInContainer=").append(googleAccounts).append(" ");
+                    top.niunaijun.blackbox.core.system.accounts.IBAccountManagerService accounts =
+                            top.niunaijun.blackbox.core.system.accounts.IBAccountManagerService.Stub
+                                    .asInterface(accountBinder);
+                    d.append("googleAccountsInContainer=")
+                            .append(accounts.getAccountsAsUser("com.google", USER_ID).length).append(" ");
+                    // Which kinds of accounts there are, as counts per type ("com.google x1"), never whose.
+                    d.append("accountTypesInContainer=")
+                            .append(top.niunaijun.blackbox.fake.frameworks.SignInDiagnostics.countByType(
+                                    accounts.getAccountsAsUser(null, USER_ID))).append(" ");
                 }
             } catch (Throwable ignored) {
                 // not available

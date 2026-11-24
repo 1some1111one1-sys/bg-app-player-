@@ -1250,7 +1250,9 @@ KEEP_PATCHES = [
         # (AuthenticatorCaller); a caller that is no virtual app keeps its own.
         "core/system/accounts/BAccountManagerService.java",
         """        loginOptions.putInt(AccountManager.KEY_CALLER_UID, Binder.getCallingUid());""",
-        """        loginOptions.putInt(AccountManager.KEY_CALLER_UID, AuthenticatorCaller.uidOfCaller());""",
+        """        final int uidForGoogle = AuthenticatorCaller.uidOfCaller();
+        loginOptions.putInt(AccountManager.KEY_CALLER_UID, uidForGoogle);
+        TokenRequestNotes.request(callerPkg, authTokenType, uidForGoogle, customTokens, accounts, account);""",
         1,
     ),
     (
@@ -1287,6 +1289,55 @@ KEEP_PATCHES = [
         """                    intent.setPackage(origPackage);
                     top.niunaijun.blackbox.fake.service.ExternalLinks.noteLeaving(
                             "no screen in the container takes it", intent);""",
+        1,
+    ),
+    (
+        # What Google Play services answered to a request for a token goes into the log (the length of a
+        # token, the screen it asks to show, or its error), next to the line written when the request came.
+        "core/system/accounts/BAccountManagerService.java",
+        """                    if (intent != null && notifyOnAuthFailure && !customTokens) {""",
+        """                    TokenRequestNotes.answered(callerPkg,
+                            result.getString(AccountManager.KEY_AUTHTOKEN) == null ? -1
+                                    : result.getString(AccountManager.KEY_AUTHTOKEN).length(),
+                            intent == null || intent.getComponent() == null ? null
+                                    : intent.getComponent().flattenToShortString(),
+                            intent == null ? null : intent.getAction(),
+                            result.getInt(AccountManager.KEY_ERROR_CODE, -1),
+                            result.getString(AccountManager.KEY_ERROR_MESSAGE), result.keySet());
+                    if (intent != null && notifyOnAuthFailure && !customTokens) {""",
+        1,
+    ),
+    (
+        # "This token does not work any more" (invalidateAuthToken, the usual way for an app to recover from
+        # an expired token) removed the token from the account's DATA instead of from its saved tokens, so
+        # the saved token stayed and every new request got the same dead token back. Android removes every
+        # saved token of the accounts of that type that equals it. Only an authenticator whose tokens the
+        # container keeps itself is affected; the log line "token request: ..." says whether Google's is one.
+        "core/system/accounts/BAccountManagerService.java",
+        """                    account.accountUserData.values().remove(authToken);""",
+        """                    account.authTokens.values().removeAll(java.util.Collections.singleton(authToken));""",
+        1,
+    ),
+    (
+        # AccountManager.getAccounts() ("every account") is its own call of Android's account service,
+        # getAccounts(type, package), and not a getAccountsAsUser: the engine hooked the others but not this
+        # one, so it went to the phone's real account service and an app in the container was told about
+        # the accounts of the PHONE (none, or the person's own, depending on the phone) instead of the ones
+        # in the container. It is now answered by the container's account service like the others.
+        "fake/service/IAccountManagerProxy.java",
+        """    @ProxyMethod("getAccountsAsUser")""",
+        """    @ProxyMethod("getAccounts")
+    public static class getAccounts extends MethodHook {
+
+        @Override
+        protected Object hook(Object who, Method method, Object[] args) throws Throwable {
+            String type = args != null && args.length > 0 && args[0] instanceof String ? (String) args[0] : null;
+            Account[] accounts = BAccountManager.get().getAccountsAsUser(type);
+            return accounts == null ? new Account[0] : accounts;
+        }
+    }
+
+    @ProxyMethod("getAccountsAsUser")""",
         1,
     ),
 ]

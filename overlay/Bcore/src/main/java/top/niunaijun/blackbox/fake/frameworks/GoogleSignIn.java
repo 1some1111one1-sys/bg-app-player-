@@ -1160,7 +1160,8 @@ public final class GoogleSignIn {
                 } catch (Throwable ignored) {
                     // the report goes on with what is known
                 }
-                r.append("BG App Runner, Google sign-in report\n");
+                r.append("BG App Runner, Google sign-in report (build ").append(SignInDiagnostics.BUILD)
+                        .append(")\n");
                 synchronized (facts) {
                     r.append(facts);
                 }
