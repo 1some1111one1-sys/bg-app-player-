@@ -530,10 +530,11 @@ KEEP_PATCHES = [
         # Android adds who is asking (user id and process id of the caller) to the options of an
         # "add account" request before it reaches the sign-in service. This engine added them only
         # for token requests, and Google's service may look at them for an add-account request.
+        # The user id is the one the asking virtual app has inside the container (AuthenticatorCaller).
         "core/system/accounts/BAccountManagerService.java",
         """final Bundle options = (optionsIn == null) ? new Bundle() : optionsIn;""",
         """final Bundle options = (optionsIn == null) ? new Bundle() : optionsIn;
-        options.putInt(AccountManager.KEY_CALLER_UID, Binder.getCallingUid());
+        options.putInt(AccountManager.KEY_CALLER_UID, AuthenticatorCaller.uidOfCaller());
         options.putInt(AccountManager.KEY_CALLER_PID, Binder.getCallingPid());""",
         1,
     ),
@@ -590,7 +591,7 @@ KEEP_PATCHES = [
 
             // Web links go to the phone's own browser, not to a virtual app's https filter.
             if (top.niunaijun.blackbox.fake.service.ExternalLinks.isWebLink(intent)) {
-                top.niunaijun.blackbox.fake.service.ExternalLinks.protectForTrip();
+                top.niunaijun.blackbox.fake.service.ExternalLinks.protectForTrip(intent);
                 return method.invoke(who, args);
             }
 
@@ -1208,6 +1209,84 @@ KEEP_PATCHES = [
         """        String methodName = method.getName();""",
         """        top.niunaijun.blackbox.fake.service.RealProviderSource.fix(mAppPkg, args);
         String methodName = method.getName();""",
+        1,
+    ),
+    (
+        # "All accounts" is a question without a type (AccountManager.getAccounts()), and Android answers it
+        # with every account. The container's account service compared every account's type with "null",
+        # found none, and answered with nothing, so an app that asks that way (Google Play Store does)
+        # saw no account at all although the sign-in had succeeded, and asked for a sign-in again.
+        "core/system/accounts/BAccountManagerService.java",
+        """    public Account[] getAccountsAsUser(String accountType, int userId) throws RemoteException {""",
+        """    public Account[] getAccountsAsUser(String accountType, int userId) throws RemoteException {
+        if (accountType == null) {
+            BUserAccounts everything = getUserAccounts(userId);
+            List<Account> all = new ArrayList<>();
+            synchronized (everything.lock) {
+                for (BAccount account : everything.accounts) {
+                    all.add(account.account);
+                }
+            }
+            return all.toArray(new Account[]{});
+        }""",
+        1,
+    ),
+    (
+        "core/system/accounts/BAccountManagerService.java",
+        """    public Account[] getAccountsByTypeForPackage(String type, String packageName, int userId) throws RemoteException {""",
+        """    public Account[] getAccountsByTypeForPackage(String type, String packageName, int userId) throws RemoteException {
+        if (type == null) {
+            // no type: every account the package may see
+            return getAccountsForPackage(packageName, 0, userId);
+        }""",
+        1,
+    ),
+    (
+        # Who asks, as Google Play services is told it: a login token or a new account is requested from
+        # Google Play services with the uid of the asking app in the request, and Google checks that uid
+        # against the package the app names ("Only 0p apps are allowed to call this API" for Play Store's
+        # addAccount, which arrived with the container's uid). Every virtual app has the container's uid
+        # for Android, so the request now carries the uid the asking app has inside the container
+        # (AuthenticatorCaller); a caller that is no virtual app keeps its own.
+        "core/system/accounts/BAccountManagerService.java",
+        """        loginOptions.putInt(AccountManager.KEY_CALLER_UID, Binder.getCallingUid());""",
+        """        loginOptions.putInt(AccountManager.KEY_CALLER_UID, AuthenticatorCaller.uidOfCaller());""",
+        1,
+    ),
+    (
+        # Android 15 checks the package a caller names against the caller's uid in many calls of the
+        # device policy service ("Caller with uid 10493 is not com.google.android.gms"). In the
+        # container the uid is this app's and the package is the virtual app's, so Google Play services'
+        # account chooser (and the question whether account management is turned off, which comes
+        # before every sign-in) died with a SecurityException on Android 15; Android 14 does not ask for
+        # the package. The package is now this app's own, and a refused question that only asks is
+        # answered with "nothing" (DevicePolicyCaller).
+        "fake/service/IDevicePolicyManagerProxy.java",
+        """    @ProxyMethod("getStorageEncryptionStatus")""",
+        """    @Override
+    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        DevicePolicyCaller.useHostPackage(args);
+        try {
+            return super.invoke(proxy, method, args);
+        } catch (Throwable e) {
+            if (DevicePolicyCaller.canAnswerHarmlessly(method, e)) {
+                return DevicePolicyCaller.harmlessAnswer(method, e);
+            }
+            throw e;
+        }
+    }
+
+    @ProxyMethod("getStorageEncryptionStatus")""",
+        1,
+    ),
+    (
+        # A launch no screen of the container can take goes to the phone itself. It is written into the log
+        # (where it goes, never any value) so a report can tell a sign-in that left for Chrome from one that failed.
+        "fake/service/ActivityManagerCommonProxy.java",
+        """                    intent.setPackage(origPackage);""",
+        """                    intent.setPackage(origPackage);
+                    top.niunaijun.blackbox.fake.service.ExternalLinks.noteLeaving(
+                            "no screen in the container takes it", intent);""",
         1,
     ),
 ]

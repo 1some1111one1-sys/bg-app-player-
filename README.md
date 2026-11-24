@@ -426,6 +426,53 @@ refused with "Only 0p apps are allowed to call this API" (Google's service ident
 uid), Play Store's install-session questions get package mismatches, and Firebase says the INTERNET permission
 is missing. If sign-in still fails after this build, the in-app sign-in report is what shows where.
 
+**Sign-in works on one phone but not the other, and Play Store asks for a sign-in again (build 45).** Two things
+were reported after build 44. The sign-in worked on the Lava (Android 14) and ended in "Something went wrong /
+problem communicating with Google servers" on the Xiaomi (Android 15), with the data meter at 0 KB/s. So it is not
+a fault of Google's servers: the same account and the same Google code behave differently on the two phones,
+which points at something Android 15 does differently inside the container. And, on one of the phones, after a
+sign-in that worked Play Store still asked to sign in, and a second sign-in said the account was already on the
+device (the account was in the container, Play Store just did not get it). This build fixes the causes that the
+logs and Android's code support, and adds what is missing to find the rest; none of it is confirmed on a phone yet.
+
+Build 45:
+
+- `DevicePolicyCaller` (an `invoke` added to `IDevicePolicyManagerProxy`): Android 15 asks many questions of its
+  device policy service together with the asking app's package name, and refuses with `Caller with uid 10493
+  is not com.google.android.gms` when the package does not belong to the caller's uid. Inside the container
+  the caller is this app and the package is the virtual app's, so every such question was refused. Android 14
+  does not send the package, which is the only difference between the two phones found so far;
+  Google Play services' account chooser crashed on it, and the question "is account management turned off",
+  which comes before a sign-in, is of the same kind. The package of a virtual app in the arguments is now this
+  app's own, and a question (get..., is..., has..., can...) that is still refused is answered with "nothing"
+  (empty list, 0, no); a change (set..., add...) is still refused. Log: `device policy: Android refused ...`.
+- `AuthenticatorCaller` (used where the account service puts `KEY_CALLER_UID` into the request to Google Play
+  services, for a login token and for a new account): the request carried this app's real uid for every virtual
+  app, Google looked that uid up in the container, found its own packages instead of Play Store, and refused
+  (`Only 0p apps are allowed to call this API`, seen for Play Store's `addAccount` in the build 44 report).
+  The request now carries the uid the asking virtual app has inside the container (10003 for Play Store), found
+  from the caller's process id. A caller that is no virtual app (this app's own sign-in button) keeps its uid.
+  Log: `requests to sign-in services now carry the uid the calling virtual app has inside the container`.
+- "All accounts" (an account question without a type, which is what `AccountManager.getAccounts()` asks) was
+  answered with nothing by the container's account service, which compared every account's type with null.
+  Android answers it with every account, and so does the container now (`getAccountsAsUser` and
+  `getAccountsByTypeForPackage`). Without it an app that asks that way saw no account after a successful
+  sign-in and asked for one again.
+- What the report now shows, to find what is still unknown: the network the app used since the attempt began
+  (`SignInDiagnostics`; "nothing at all" means the request never left the phone, a few KB means it did and the
+  answer was refused), the number of accounts of each type in the space (counts and types, never names),
+  snapshots up to 80 seconds after the screen opened, more lines of Google's screen process (120 and 90 lines
+  instead of 90 and 45, with refusals and network errors ranked first), and a line for every launch that leaves
+  the container (`LaunchNotes`, written by the container's `startActivity`): the action, the app or screen, the
+  address with host, a shortened path and only the names of its parameters (never values), so a sign-in that was
+  handed to Chrome can be told from one that failed. Web addresses opened by a virtual app were already sent to
+  the phone's browser; this only records it.
+
+Still unknown after this build: where the "Something went wrong" screen is shown (Google's own screen in the
+container or the browser) and what it tried to reach; the reports above are meant to tell. Not changed:
+the properties of the phone that native Google code sees (a Pixel 6 with Android 12), Play Store's install-session
+questions, `hasFeatures`, Firebase's "missing INTERNET permission".
+
 **The Play Store record (builds after 35).** Google's own client code, which is inside every app that uses
 Play services, checks that the Play Store on the phone is the genuine one: it compares its signing
 certificate with Google's (log: `requires Google Play Store, but its signature is invalid`). The engine
@@ -509,6 +556,10 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/Bcore/src/main/java/.../fake/service/RealProviderSource.java` | Gives the `AttributionSource` of a call to a provider of the real system (Google's) the app's real uid and package name on Android 12 and newer, so Play Store can read the device id; called from `ContentProviderStub` |
 | `overlay/Bcore/src/main/java/.../fake/service/CallingGuest.java` | Finds which virtual app made a call from another virtual app (by the caller's real process id) and lets the check of an incoming `AttributionSource` pass; used by `NativeCore` |
 | `overlay/Bcore/src/main/java/.../fake/service/ActivityServiceAnswers.java` | Answers a refusal of Android's activity service once, with the default of the method's return type; used by `IActivityManagerProxy` |
+| `overlay/Bcore/src/main/java/.../core/system/accounts/AuthenticatorCaller.java` | The uid the account service puts into a request to Google Play services: the one the asking virtual app has inside the container (build 45) |
+| `overlay/Bcore/src/main/java/.../fake/service/DevicePolicyCaller.java` | Gives a device policy question the package Android 15 expects, and answers a refused question with "nothing" (build 45); used by `IDevicePolicyManagerProxy` |
+| `overlay/Bcore/src/main/java/.../fake/service/LaunchNotes.java` | Writes a launch that leaves the container into the log without any private value (build 45); used by `ExternalLinks` |
+| `overlay/Bcore/src/main/java/.../fake/frameworks/SignInDiagnostics.java` | Network bytes during a sign-in and account counts by type, for the report (build 45) |
 | `overlay/Bcore/src/main/aidl/.../core/system/am/IBActivityManagerService.aidl` | The engine's file plus `getBUidByPid` at the end (which virtual app runs this real process), answered by `BActivityManagerService` |
 | `overlay/app/src/main/java/.../view/gms/GoogleSignInDialogs.java` | The boxes around a sign-in: progress, "screen is open", and the reason with a report to copy |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalFolders.java` | Creates the folders an app expects on "phone storage" inside the container before it starts |
@@ -521,5 +572,5 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/app/src/main/java/.../runner/KeepAliveService.java` | Foreground service with a partial wake lock |
 | `overlay/Bcore/.../StayActive.java` | Engine-side hook behind "Stay active in background" and the Java side of the mute |
 | `overlay/Bcore/src/main/cpp/BgMute/BgMute.cpp` | Native AudioTrack hook that mutes game audio in the background |
-| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources, among them the engine's `IActivityManagerProxy` (device-aware permission check, Android 15), `IUserManagerProxy` (app restrictions for a user, Android 15; answers to questions Android refuses), `NativeCore` (calling user id for the retry as system; calling virtual app per call; attribution check), `ContentProviderStub` and `IConnectivityManagerProxy` (build 44), `ActivityStack` (host-start markers), `BActivityThread` and `HCallbackProxy` (app code kept in a second Android user) |
+| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources, among them the engine's `IActivityManagerProxy` (device-aware permission check, Android 15), `IUserManagerProxy` (app restrictions for a user, Android 15; answers to questions Android refuses), `NativeCore` (calling user id for the retry as system; calling virtual app per call; attribution check), `ContentProviderStub` and `IConnectivityManagerProxy` (build 44), `BAccountManagerService` (all accounts; caller uid), `IDevicePolicyManagerProxy` and `ActivityManagerCommonProxy` (build 45), `ActivityStack` (host-start markers), `BActivityThread` and `HCallbackProxy` (app code kept in a second Android user) |
 | `.github/workflows/build-apk.yml` | Builds the APK on GitHub Actions |

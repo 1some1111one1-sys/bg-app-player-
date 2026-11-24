@@ -74,7 +74,7 @@ public final class GoogleSignIn {
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     /** When, after the sign-in screen was opened, to write down what the phone shows of this app. */
-    private static final long[] SNAPSHOT_AT_MS = {800, 2500, 5000, 9000};
+    private static final long[] SNAPSHOT_AT_MS = {800, 2500, 5000, 9000, 20_000, 40_000, 80_000};
 
     /** Sign-in screens of Google Play services, tried one by one when the direct way is used. */
     private static final String[] DIRECT_SCREENS = {
@@ -262,6 +262,8 @@ public final class GoogleSignIn {
         private int accountsBefore;
         private long accountSeenAt;
         private IBAccountManagerService service;
+        /** What the phone's network meter said for this app when the attempt began (see SignInDiagnostics). */
+        private volatile long[] trafficAtStart;
 
         Attempt(int userId, Listener listener) {
             this.userId = userId;
@@ -320,6 +322,7 @@ public final class GoogleSignIn {
                 Log.i(TAG, "sign-in attempt " + id + " started in space " + userId);
                 note("started");
                 progress(0);
+                trafficAtStart = SignInDiagnostics.traffic();
                 describePhone();
 
                 if (!BlackBoxCore.get().isInstalled(GmsCore.GMS_PKG, userId)) {
@@ -381,6 +384,15 @@ public final class GoogleSignIn {
                 fact("Google accounts already in this space: " + accountsBefore);
             } catch (Throwable e) {
                 fact("Google accounts already in this space: could not be read");
+            }
+            try {
+                // The question Android's account manager asks for "all accounts" has no type. Build 44's
+                // container answered it with nothing, so Play Store found no account and asked for a sign-in.
+                Account[] every = service.getAccountsAsUser(null, userId);
+                fact("All accounts in this space, whatever the type (the question Play Store asks): "
+                        + (every == null ? "no answer" : every.length + " (" + SignInDiagnostics.countByType(every) + ")"));
+            } catch (Throwable e) {
+                fact("All accounts in this space, whatever the type: could not be read (" + e + ")");
             }
         }
 
@@ -503,8 +515,9 @@ public final class GoogleSignIn {
                 } else {
                     long sinceOpen = SystemClock.elapsedRealtime() - openedAt;
                     while (nextSnapshot < SNAPSHOT_AT_MS.length && sinceOpen >= SNAPSHOT_AT_MS[nextSnapshot]) {
-                        note(String.format(Locale.US, "%.1f s after the screen was opened, %s",
-                                SNAPSHOT_AT_MS[nextSnapshot] / 1000.0, describeHostScreens()));
+                        note(String.format(Locale.US, "%.1f s after the screen was opened, %s; %s",
+                                SNAPSHOT_AT_MS[nextSnapshot] / 1000.0, describeHostScreens(),
+                                SignInDiagnostics.trafficSince(trafficAtStart)));
                         nextSnapshot++;
                     }
                     if (elapsed >= nextAccountCheck) {
@@ -1151,6 +1164,7 @@ public final class GoogleSignIn {
                 synchronized (facts) {
                     r.append(facts);
                 }
+                r.append("Network: ").append(SignInDiagnostics.trafficSince(trafficAtStart)).append('\n');
                 r.append("Result: ").append(headline).append('\n');
                 String error = tapError;
                 r.append("Stopped at: ").append(stage == Stage.ERROR && error != null
@@ -1238,7 +1252,7 @@ public final class GoogleSignIn {
                     continue;
                 }
                 String key = line.tag + "|" + clip(line.message, 70);
-                if (otherSeen.add(key) && other.size() < 25) {
+                if (otherSeen.add(key) && other.size() < 40) {
                     other.add(line);
                 }
             }
@@ -1362,7 +1376,9 @@ public final class GoogleSignIn {
                     break;
                 }
                 int pid = entry.getKey();
-                out.append(processLog(window, pid, entry.getValue(), askedAt, pid == main ? 90 : 45,
+                // The screens of the sign-in run in a process of their own, and "something went wrong"
+                // is written there; the build 44 report kept only 45 of its lines, too few to tell why.
+                out.append(processLog(window, pid, entry.getValue(), askedAt, pid == main ? 120 : 90,
                         pid == main));
                 sections++;
             }
@@ -1542,10 +1558,24 @@ public final class GoogleSignIn {
             if (line.level == 'E' || line.level == 'F') {
                 return frame ? 2 : 5;
             }
+            if (!frame && namesARefusalOrNetworkFault(text)) {
+                return 4; // a refusal or a network fault, whatever level it was logged at
+            }
             if (line.level == 'W') {
                 return frame ? 1 : 3;
             }
             return 2;
+        }
+
+        /** True for a line that says a call was refused, or that the network could not be used. */
+        private boolean namesARefusalOrNetworkFault(String text) {
+            String t = text.toLowerCase(Locale.US);
+            return t.contains("only 0p") || t.contains("does not belong") || t.contains("caller with uid")
+                    || t.contains("not allowed") || t.contains("denied") || t.contains("refus")
+                    || t.contains("unknownhost") || t.contains("unable to resolve host")
+                    || t.contains("timed out") || t.contains("timeout") || t.contains("ssl")
+                    || t.contains("certificate") || t.contains("no network") || t.contains("not connected")
+                    || t.contains("network error") || t.contains("networkerror") || t.contains("offline");
         }
 
         /**
@@ -1645,7 +1675,9 @@ public final class GoogleSignIn {
             return text.contains("exception") || text.contains("denied") || text.contains("permission")
                     || text.contains("not allowed") || text.contains("caller") || text.contains("account")
                     || text.contains("sign-in") || text.contains("signin") || text.contains("login")
-                    || text.contains("security");
+                    || text.contains("security") || namesARefusalOrNetworkFault(line.message)
+                    || text.contains("network") || text.contains("connect") || text.contains("request")
+                    || text.contains("server") || text.contains("failed") || text.contains("error");
         }
 
         private boolean worthALook(LogLine line) {
@@ -1655,7 +1687,11 @@ public final class GoogleSignIn {
                     || text.contains("GoogleSignatureVerifier") || text.contains("GooglePlayServicesUtil")
                     || text.contains("ClassNotFoundException") || text.contains("NoClassDefFoundError")
                     || text.contains("UnsatisfiedLink") || text.contains("Fatal signal")
-                    || text.contains("Caught a RuntimeException") || text.contains("Binder call failed")) {
+                    || text.contains("Caught a RuntimeException") || text.contains("Binder call failed")
+                    || text.contains("Only 0p apps") || text.contains("does not belong to uid")
+                    || text.contains("Caller with uid") || text.contains("UnknownHostException")
+                    || text.contains("Unable to resolve host") || text.contains("SSLHandshake")
+                    || text.contains("leaves the container")) {
                 return true;
             }
             if (line.level == 'W' || line.level == 'E' || line.level == 'F') {

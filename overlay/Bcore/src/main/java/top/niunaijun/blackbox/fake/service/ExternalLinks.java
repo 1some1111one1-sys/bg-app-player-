@@ -6,8 +6,10 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.net.Uri;
+import android.os.Bundle;
 import android.os.SystemClock;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -23,6 +25,75 @@ public final class ExternalLinks {
     private static long sBrowsersAt;
 
     private ExternalLinks() {
+    }
+
+    /** {@link #protectForTrip()}, and a line in the log (see {@link #noteLeaving}) saying where the user is sent. */
+    public static void protectForTrip(Intent intent) {
+        noteLeaving("a web address goes to the phone's own browser", intent);
+        protectForTrip();
+    }
+
+    /**
+     * Writes into the log that a launch of a virtual app is handed to the phone itself instead of to a
+     * screen of the container, and what it is about: the action, the target app or screen, the address
+     * (host, a shortened path and only the names of its parameters) and the names of the extras. Never a
+     * value. A sign-in that leaves for Chrome and never comes back looks, from inside the container,
+     * exactly like a sign-in that failed, and this line is what tells them apart.
+     */
+    public static void noteLeaving(String why, Intent intent) {
+        try {
+            StringBuilder text = new StringBuilder("a virtual app leaves the container: ").append(why)
+                    .append("; app ").append(BActivityThread.getAppPackageName());
+            if (intent == null) {
+                text.append("; no intent");
+            } else {
+                text.append("; action ").append(intent.getAction());
+                ComponentName component = intent.getComponent();
+                if (component != null) {
+                    text.append(", screen ").append(component.flattenToShortString());
+                }
+                if (intent.getPackage() != null) {
+                    text.append(", package ").append(intent.getPackage());
+                }
+                if (intent.getType() != null) {
+                    text.append(", type ").append(intent.getType());
+                }
+                Uri data = intent.getData();
+                if (data != null) {
+                    text.append(", address ").append(describeAddress(data));
+                }
+                try {
+                    // a copy: reading extras can fail on classes of the app, and must not touch the intent
+                    Bundle extras = new Intent(intent).getExtras();
+                    if (extras != null && !extras.isEmpty()) {
+                        text.append(", extras ").append(new ArrayList<String>(extras.keySet()));
+                    }
+                } catch (Throwable e) {
+                    text.append(", extras not readable here");
+                }
+            }
+            LaunchNotes.note(text.toString());
+        } catch (Throwable ignored) {
+            // only a line in the log
+        }
+    }
+
+    private static String describeAddress(Uri uri) {
+        String scheme = uri.getScheme();
+        String host = null;
+        String path = null;
+        Set<String> names = null;
+        try {
+            host = uri.getHost();
+            boolean web = "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
+            if (web && uri.isHierarchical()) {
+                path = uri.getPath();
+                names = uri.getQueryParameterNames();
+            }
+        } catch (Throwable ignored) {
+            // what could be read is described
+        }
+        return LaunchNotes.describeAddress(scheme, host, path, names);
     }
 
     /**
