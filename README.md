@@ -40,12 +40,22 @@ the end of the workflow against the key it should carry.
 
 ## Use it
 
-**Look:** calm liquid glass. A deep blue backdrop with soft lights that drift, swell and slowly change
-shade (mostly blue, with violet, teal and a touch of rose), flowing contour lines, faint rings, tiny
-floating lights and a grid of dots that creeps along, with frosted glass panels on top. The same
-backdrop is behind the BlackBox manager screens. It moves all the time while the screen shows it, at
-about 30 frames per second from a few cached gradients, whatever the phone's animation or battery
-saver settings say. It only stops while the screen is off or another app is in front.
+**Look:** calm liquid glass. The backdrop (since build 47) is calm and blue: a smooth gradient from deep
+navy blue at the top to ocean blue at the bottom, with five big soft lights, all of them blue, that drift
+very slowly, swell and shrink a little and change slowly between two blues. The fastest one moves about
+9 dp per second on a 360 dp wide screen; a change of blue takes at least 14 seconds. There are no other
+colours and no lines, rings, dots or sparks (before build 47 the backdrop also had violet, teal and rose
+lights, wave lines, spreading rings, a dot grid and floating sparks, which was too busy). Frosted glass
+panels sit on top, and a very faint grain keeps the dark gradient from showing steps of colour. The
+same backdrop is behind the BlackBox manager screens, and the status bar and navigation bar of those
+screens use its top and bottom colours. It moves all the time while the screen shows it, about 20 times
+a second from a few cached gradients, whatever the phone's animation or battery saver settings say. It
+only stops while the screen is off or another app is in front.
+
+The numbers behind it are in `BackdropMotion.java` (plain maths, no Android classes). They were checked
+on a computer, not on a phone: every colour is a blue, nothing moves or changes faster than the limits
+above, and at the brightest moment the backdrop ever reaches (a point where several lights overlap) the
+app's smallest grey text still has a contrast of 4.6 to 1 and its title text 8 to 1.
 
 The main screen is laid out top to bottom:
 
@@ -585,6 +595,7 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | --- | --- |
 | `overlay/app/src/main/java/.../runner/RunnerActivity.java` | Main screen: BlackBox manager card, app list, grouped settings |
 | `overlay/app/src/main/java/.../runner/Glass*.java` | The glass look: live backdrop, frosted panel, switch, colours |
+| `overlay/app/src/main/java/.../runner/BackdropMotion.java` | Where the blue lights of the backdrop are at any moment, their blues, strengths and speeds, as plain maths that can be checked on a computer (build 47); used by `GlassBackground` |
 | `overlay/app/src/main/java/.../view/base/BaseActivity.kt` | Puts the live backdrop behind every manager screen |
 | `overlay/app/src/main/res/` | Colours, theme and layouts that restyle the BlackBox manager screens |
 | `overlay/Bcore/src/main/java/.../fake/service/ICredentialManagerProxy.java` | Answers Android's Credential Manager (Sign in with Google picker, passkeys) with "no saved logins" inside the container; without it Android refuses with a SecurityException and Instagram closes ~10 s after it starts |
