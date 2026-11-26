@@ -11,20 +11,23 @@ import android.graphics.drawable.RippleDrawable;
 import android.os.Build;
 
 /**
- * Colours and small helpers for the "calm liquid glass" look: a calm blue backdrop with a few slow
- * soft lights behind it, frosted translucent panels with a lit edge, cool cyan accents, and a little
+ * Colours and small helpers for the "calm liquid glass" look: a deep navy-teal backdrop with soft
+ * lights behind it, frosted translucent panels with a lit edge, cool cyan accents, and a little
  * monospace lettering for the quiet sci-fi touches.
  */
 final class Glass {
     private Glass() {
     }
 
-    // Backdrop, top to bottom: deep navy blue, deep blue, ocean blue. The same three colours are in
-    // res/values/colors.xml (glass_bg_top, glass_bg_mid, glass_bg_bottom) for the window, the status
-    // bar and the navigation bar, so the screen and the bars are one piece of colour.
-    static final int BG_TOP = 0xFF061638;
-    static final int BG_MID = 0xFF0A2559;
-    static final int BG_BOTTOM = 0xFF09336A;
+    // Backdrop, top to bottom
+    static final int BG_TOP = 0xFF060A18;
+    static final int BG_MID = 0xFF0B1530;
+    static final int BG_BOTTOM = 0xFF08283A;
+
+    // Soft lights behind the glass
+    static final int ORB_CYAN = 0xFF3AB8FF;
+    static final int ORB_VIOLET = 0xFF7A6BFF;
+    static final int ORB_TEAL = 0xFF22D6C0;
 
     // Text
     static final int TEXT = 0xFFF4F7FF;
