@@ -519,6 +519,58 @@ request: build 48 has the background of build 46 again (the files `Glass.java`, 
 `colors.xml` are as they were in build 46, and `BackdropMotion.java` is gone). Nothing else changed in build 48
 except the build number shown in the debug log and the sign-in report (`SignInDiagnostics.BUILD`, 48).
 
+**The "Check Play Store login" button (build 49).** After build 46 the Play Store on the Xiaomi still opens
+with "Authentication is required", and no log of it has reached the developer. Instead of asking for a log, this
+build adds a button, **Check Play Store login** (main screen, Google services section), that tests the login
+and writes the result on the screen in plain words, so that a screenshot is enough. It does not repair anything:
+it is there to show where the login breaks, so that the next build can fix that. How to use it: open Play Store
+in the container, wait for the error, come back to this app and tap the button (it takes up to about a minute).
+
+The check runs these steps and puts each result in the report:
+
+1. The Google apps and the account in the space: whether Google Play services, Play Store and Google Services
+   Framework are installed there (with versions), how many Google accounts the container has, which account
+   types it holds (counts only) and whether a master token is saved (its length only).
+2. A login request as Play Store: the container's account service is asked for the token Play Store asks for
+   (`oauth2:https://www.googleapis.com/auth/googleplay`), naming Play Store as the asking app, and the answer
+   is awaited for up to 45 seconds. The request carries a private key (`bgRunnerAskAsPackage`) which makes the
+   container send Play Store's uid to Google Play services instead of this app's own (`AuthenticatorCaller`).
+   It is honoured only for a call that comes from this app's own screens: a virtual app's call keeps the uid it
+   has inside the container whatever it passes, and the key is taken out of the options before they go on. If
+   the container held a saved Play Store token, it is removed for the test (otherwise the container would answer
+   from it and Google would not be asked) and put back if the test fails; a token Google gives is saved like
+   any other, which replaces a stale one. The answer is sorted into: a token (its length only; or "fast, saved
+   token, Google was not asked"), a screen Google wants to show instead (which one), an error (the code in words
+   and the message), no answer in 45 seconds, or the request could not be sent.
+3. The connection: the network in use (Wi-Fi, mobile data, VPN, whether Android has validated it, private DNS),
+   Data Saver, whether three addresses that a login passes can be reached (`www.google.com/generate_204`,
+   `android.googleapis.com/auth`, `android.clients.google.com/`) and how long they take, and the phone's clock
+   against the date Google puts on its answer (more than 5 minutes apart is reported, as that breaks secure
+   connections).
+4. The phone's Google device id, read from the phone's own Google Services Framework
+   (`content://com.google.android.gsf.gservices`, `android_id`) as Play Store reads it. Zero, refused or an
+   error is reported (an older Xiaomi log showed Play Store with `Unexpected android-id = 0`). The id itself is
+   never shown or kept, only whether it was read.
+5. This app's own log (every virtual app is part of it): the lines of the container's account service, Play
+   Store's warnings and errors about logins, the sign-in warnings of Google Play services, and counts of
+   `Unexpected android-id`, `AuthFailureError` / `Authentication is required` and refused callers.
+   E-mail addresses, numbers of 12 digits or more and long token-like strings are replaced before a line is kept.
+
+The report opens with the verdict in one to three sentences, then lines marked `!!` for things that look wrong
+(a device id of zero, addresses that cannot be reached, a clock that is far off, Data Saver, authentication
+failures or refused callers in the log, no Play Store request in the log although the test worked), then the facts, then the log lines kept; **Copy
+details** copies all of it, and the same result is written to the log (`Play Store login check started in
+space N`, `... finished: <verdict>`, tag `BlackBoxAccounts`). Only counts, lengths and yes/no leave the check:
+no account name, token or device id.
+
+Also in build 49: `TokenRequestNotes` wrote the lines about login token requests "the first 3 times, then every
+25th", which would have hidden a later attempt of Play Store, so a line is now also written when more than 10
+seconds have passed since the last line of its kind; and the build number shown in the reports is 49.
+
+The check was run only on a computer against stand-ins of the parts of Android it uses, and its real build is
+the first time it is compiled against Android; it has not been tried on a phone. Which phone shows which
+symptom, and what the check says there, is still not known.
+
 **The Play Store record (builds after 35).** Google's own client code, which is inside every app that uses
 Play services, checks that the Play Store on the phone is the genuine one: it compares its signing
 certificate with Google's (log: `requires Google Play Store, but its signature is invalid`). The engine
@@ -602,11 +654,15 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/Bcore/src/main/java/.../fake/service/RealProviderSource.java` | Gives the `AttributionSource` of a call to a provider of the real system (Google's) the app's real uid and package name on Android 12 and newer, so Play Store can read the device id; called from `ContentProviderStub` |
 | `overlay/Bcore/src/main/java/.../fake/service/CallingGuest.java` | Finds which virtual app made a call from another virtual app (by the caller's real process id) and lets the check of an incoming `AttributionSource` pass; used by `NativeCore` |
 | `overlay/Bcore/src/main/java/.../fake/service/ActivityServiceAnswers.java` | Answers a refusal of Android's activity service once, with the default of the method's return type; used by `IActivityManagerProxy` |
-| `overlay/Bcore/src/main/java/.../core/system/accounts/AuthenticatorCaller.java` | The uid the account service puts into a request to Google Play services: the one the asking virtual app has inside the container (build 45) |
+| `overlay/Bcore/src/main/java/.../core/system/accounts/AuthenticatorCaller.java` | The uid the account service puts into a request to Google Play services: the one the asking virtual app has inside the container (build 45); for a test request from this app's own screens that names a package (`bgRunnerAskAsPackage`), the app id of that package (build 49) |
+| `overlay/Bcore/src/main/java/.../fake/frameworks/PlayLoginCheck.java` | The "Check Play Store login" test: the apps and account in the space, a login request as Play Store, the connection, the phone's Google device id and the log; reports only counts, lengths and yes/no (build 49) |
+| `overlay/Bcore/src/main/java/.../fake/frameworks/PlayLoginReport.java` | Turns what the check found into plain sentences, `!!` warnings and the report text (no Android classes, so it is checked on a computer) (build 49) |
+| `overlay/Bcore/src/main/java/.../fake/frameworks/PlayLoginLog.java` | Reads this app's own log and sorts the lines about the Play Store login, with e-mail addresses, long numbers and token-like strings removed (build 49) |
+| `overlay/app/src/main/java/.../view/gms/PlayLoginDialogs.java` | The boxes of the check: progress, the result (monospace, Copy details, Run again) (build 49) |
 | `overlay/Bcore/src/main/java/.../fake/service/DevicePolicyCaller.java` | Gives a device policy question the package Android 15 expects, and answers a refused question with "nothing" (build 45); used by `IDevicePolicyManagerProxy` |
 | `overlay/Bcore/src/main/java/.../fake/service/LaunchNotes.java` | Writes a launch that leaves the container into the log without any private value (build 45); used by `ExternalLinks` |
 | `overlay/Bcore/src/main/java/.../fake/frameworks/SignInDiagnostics.java` | Network bytes during a sign-in and account counts by type, for the report (build 45); the build number shown in the reports (build 46) |
-| `overlay/Bcore/src/main/java/.../core/system/accounts/TokenRequestNotes.java` | The log lines about a request for a login token and what Google answered, without names or values (build 46); used by `BAccountManagerService` |
+| `overlay/Bcore/src/main/java/.../core/system/accounts/TokenRequestNotes.java` | The log lines about a request for a login token and what Google answered, without names or values (build 46; a line is also written after 10 quiet seconds, build 49); used by `BAccountManagerService` |
 | `overlay/Bcore/src/main/aidl/.../core/system/am/IBActivityManagerService.aidl` | The engine's file plus `getBUidByPid` at the end (which virtual app runs this real process), answered by `BActivityManagerService` |
 | `overlay/app/src/main/java/.../view/gms/GoogleSignInDialogs.java` | The boxes around a sign-in: progress, "screen is open", and the reason with a report to copy |
 | `overlay/Bcore/src/main/java/.../core/env/ExternalFolders.java` | Creates the folders an app expects on "phone storage" inside the container before it starts |
@@ -619,5 +675,5 @@ crash. This build switches it off (`apply_overlay.py` blanks the chat id it need
 | `overlay/app/src/main/java/.../runner/KeepAliveService.java` | Foreground service with a partial wake lock |
 | `overlay/Bcore/.../StayActive.java` | Engine-side hook behind "Stay active in background" and the Java side of the mute |
 | `overlay/Bcore/src/main/cpp/BgMute/BgMute.cpp` | Native AudioTrack hook that mutes game audio in the background |
-| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources, among them the engine's `IActivityManagerProxy` (device-aware permission check, Android 15), `IUserManagerProxy` (app restrictions for a user, Android 15; answers to questions Android refuses), `NativeCore` (calling user id for the retry as system; calling virtual app per call; attribution check), `ContentProviderStub` and `IConnectivityManagerProxy` (build 44), `BAccountManagerService` (all accounts; caller uid; token lines; removal of an invalidated token), `IAccountManagerProxy` (the "every account" call, build 46), `IDevicePolicyManagerProxy` and `ActivityManagerCommonProxy` (build 45), `ActivityStack` (host-start markers), `BActivityThread` and `HCallbackProxy` (app code kept in a second Android user) |
+| `scripts/apply_overlay.py` | Copies the overlay into the engine and patches its manifest and sources, among them the engine's `IActivityManagerProxy` (device-aware permission check, Android 15), `IUserManagerProxy` (app restrictions for a user, Android 15; answers to questions Android refuses), `NativeCore` (calling user id for the retry as system; calling virtual app per call; attribution check), `ContentProviderStub` and `IConnectivityManagerProxy` (build 44), `BAccountManagerService` (all accounts; caller uid, also for the build 49 test request; token lines; removal of an invalidated token), `IAccountManagerProxy` (the "every account" call, build 46), `IDevicePolicyManagerProxy` and `ActivityManagerCommonProxy` (build 45), `ActivityStack` (host-start markers), `BActivityThread` and `HCallbackProxy` (app code kept in a second Android user) |
 | `.github/workflows/build-apk.yml` | Builds the APK on GitHub Actions |

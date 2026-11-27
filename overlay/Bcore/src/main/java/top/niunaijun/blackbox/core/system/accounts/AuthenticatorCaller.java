@@ -1,10 +1,13 @@
 package top.niunaijun.blackbox.core.system.accounts;
 
 import android.os.Binder;
+import android.os.Bundle;
+import android.os.Process;
 import android.util.Log;
 
 import top.niunaijun.blackbox.core.system.BProcessManagerService;
 import top.niunaijun.blackbox.core.system.ProcessRecord;
+import top.niunaijun.blackbox.core.system.pm.BPackageManagerService;
 
 /**
  * Who a sign-in service (Google Play services) is told is asking.
@@ -25,13 +28,72 @@ import top.niunaijun.blackbox.core.system.ProcessRecord;
  * (10003 for Google Play Store, ...). The service knows which virtual process made the call from the
  * caller's process id, so the request carries that uid. A call from this app's own screens (for example
  * the sign-in started from the settings) comes from no virtual process and keeps the uid it had.
+ *
+ * <p>One exception, for the "Check Play Store login" button of this app: it asks for the login token that
+ * Google Play Store would get, and Google only gives that to a request that comes from Play Store. The
+ * button's request names the package it asks as ({@link #ASK_AS_PACKAGE}); a call from this app's own
+ * screens (never from a virtual app) then carries the uid that package has inside the container, exactly as
+ * a call from Play Store itself does.
  */
 public final class AuthenticatorCaller {
     private static final String TAG = "BlackBoxAccounts";
 
+    /**
+     * A key of the options of a request for a token: the package the request is made as. Only honoured for a
+     * call from this app's own screens, and always removed from the options before they go on.
+     */
+    public static final String ASK_AS_PACKAGE = "bgRunnerAskAsPackage";
+
     private static volatile boolean sLogged;
+    private static volatile boolean sLoggedTest;
 
     private AuthenticatorCaller() {
+    }
+
+    /**
+     * The uid to put into a request for a token, whose options may name a package to ask as (see
+     * {@link #ASK_AS_PACKAGE}). A call from a virtual app is told apart by its process as always, and the key is
+     * ignored; a call from this app's own screens asks as the package it names if the container has it.
+     * Never throws.
+     */
+    public static int uidOfCaller(Bundle options) {
+        String asPackage = null;
+        try {
+            if (options != null) {
+                asPackage = options.getString(ASK_AS_PACKAGE);
+                if (asPackage != null) {
+                    options.remove(ASK_AS_PACKAGE);
+                }
+            }
+        } catch (Throwable e) {
+            asPackage = null;
+        }
+        int real = Binder.getCallingUid();
+        int inside = uidInsideContainer(Binder.getCallingPid());
+        if (inside > 0 && inside != real) {
+            return uidOfCaller();
+        }
+        if (asPackage != null && inside <= 0 && real == Process.myUid()) {
+            int appId = appIdOf(asPackage);
+            if (appId > 0) {
+                if (!sLoggedTest) {
+                    sLoggedTest = true;
+                    Log.i(TAG, "a test request from this app's screens asks as " + asPackage + " (uid " + appId
+                            + " inside the container)");
+                }
+                return appId;
+            }
+        }
+        return uidOfCaller();
+    }
+
+    /** The uid a package has inside the container, or -1 if the container does not have it. */
+    static int appIdOf(String packageName) {
+        try {
+            return BPackageManagerService.get().getAppId(packageName);
+        } catch (Throwable e) {
+            return -1;
+        }
     }
 
     /** The uid to put into the request for the call being handled. Never throws. */

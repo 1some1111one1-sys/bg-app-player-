@@ -23,7 +23,7 @@ public final class SignInDiagnostics {
      * The number of the build (the release "build-N" the APK came from). The app has no other visible version
      * number, so a pasted report could not say which build wrote it. Raise it with every release.
      */
-    public static final int BUILD = 48;
+    public static final int BUILD = 49;
 
     private SignInDiagnostics() {
     }

@@ -24,12 +24,19 @@ final class TokenRequestNotes {
     private static final String TAG = "BlackBoxAccounts";
     private static final int MAX_KEYS = 200;
 
+    /** How long a kind of line stays quiet after it was written, unless it is one of the first 3 or the 25th. */
+    private static final long QUIET_MILLIS = 10_000;
+
     private static final Map<String, Integer> SEEN = new HashMap<String, Integer>();
+    private static final Map<String, Long> LAST_WRITTEN = new HashMap<String, Long>();
 
     private TokenRequestNotes() {
     }
 
-    /** A request for a token arrived: written for the first 3 of each kind, then every 25th. */
+    /**
+     * A request for a token arrived: written for the first 3 of each kind, then every 25th, and whenever the
+     * last line of its kind is more than 10 seconds old (so that a new attempt is always in the log).
+     */
     static void request(String callerPackage, String tokenType, int uidSent, boolean customTokens,
             BUserAccounts accounts, Account account) {
         try {
@@ -138,18 +145,32 @@ final class TokenRequestNotes {
 
     // ---------------------------------------------------------------------------- limits
 
-    /** True for the first 3 times a kind of line comes up, and then for every 25th. */
+    /**
+     * True for the first 3 times a kind of line comes up, then for every 25th, and for any time at least 10
+     * seconds after the last time it was true: a person who taps "Try again" in Play Store every few seconds
+     * would otherwise leave no line for the attempts after the third.
+     */
     static boolean shouldWrite(String kind) {
-        int count;
+        return shouldWrite(kind, System.currentTimeMillis());
+    }
+
+    static boolean shouldWrite(String kind, long nowMillis) {
         synchronized (SEEN) {
             if (SEEN.size() >= MAX_KEYS && !SEEN.containsKey(kind)) {
                 SEEN.clear();
+                LAST_WRITTEN.clear();
             }
             Integer known = SEEN.get(kind);
-            count = known == null ? 1 : known + 1;
+            int count = known == null ? 1 : known + 1;
             SEEN.put(kind, count);
+            Long last = LAST_WRITTEN.get(kind);
+            boolean write = count <= 3 || count % 25 == 0 || last == null || nowMillis - last >= QUIET_MILLIS
+                    || nowMillis < last; // a clock set back must not silence the line
+            if (write) {
+                LAST_WRITTEN.put(kind, nowMillis);
+            }
+            return write;
         }
-        return count <= 3 || count % 25 == 0;
     }
 
     /** The first {@code max} names in order, each cut to {@code maxLength} characters: "[a, b, ...]". */

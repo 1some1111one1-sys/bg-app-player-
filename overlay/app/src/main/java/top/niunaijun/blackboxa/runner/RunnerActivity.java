@@ -63,6 +63,7 @@ import java.util.zip.ZipFile;
 
 import top.niunaijun.blackbox.BlackBoxCore;
 import top.niunaijun.blackboxa.view.gms.GoogleSignInDialogs;
+import top.niunaijun.blackboxa.view.gms.PlayLoginDialogs;
 import top.niunaijun.blackbox.entity.pm.InstallResult;
 import top.niunaijun.blackboxa.view.main.WelcomeActivity;
 
@@ -309,6 +310,11 @@ public class RunnerActivity extends Activity {
                 "Opens Google's sign-in screen inside the container so Play Store can use your "
                         + "account. Turn on Google Play services above first.",
                 false, v -> signInToGoogle());
+        navRow(google, "Check Play Store login",
+                "Tests the login Play Store needs and shows what is wrong in plain words. If Play Store says "
+                        + "\"Authentication is required\", open it first, wait for that message, then tap this "
+                        + "and send Claude a screenshot of the result.",
+                false, v -> checkPlayStoreLogin());
 
         // Help
         LinearLayout help = section(root, "Help");
@@ -841,6 +847,13 @@ public class RunnerActivity extends Activity {
                 BlackBoxCore.get().launchApk("com.android.vending", USER_ID);
             }
         });
+    }
+
+    /** Asks the container for a Play Store login the way Play Store does and shows the result in plain words. */
+    private void checkPlayStoreLogin() {
+        // The check reads the phone's own state too (connection, device id, log), so it needs no Google
+        // services here to run; it says what is missing.
+        PlayLoginDialogs.show(this, USER_ID);
     }
 
     private void onGmsToggled(boolean checked) {

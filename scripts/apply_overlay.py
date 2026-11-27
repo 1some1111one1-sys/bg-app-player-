@@ -1247,10 +1247,11 @@ KEEP_PATCHES = [
         # against the package the app names ("Only 0p apps are allowed to call this API" for Play Store's
         # addAccount, which arrived with the container's uid). Every virtual app has the container's uid
         # for Android, so the request now carries the uid the asking app has inside the container
-        # (AuthenticatorCaller); a caller that is no virtual app keeps its own.
+        # (AuthenticatorCaller); a caller that is no virtual app keeps its own. The options are passed in so that
+        # the "Check Play Store login" button of this app can ask as Play Store (a call from no virtual app only).
         "core/system/accounts/BAccountManagerService.java",
         """        loginOptions.putInt(AccountManager.KEY_CALLER_UID, Binder.getCallingUid());""",
-        """        final int uidForGoogle = AuthenticatorCaller.uidOfCaller();
+        """        final int uidForGoogle = AuthenticatorCaller.uidOfCaller(loginOptions);
         loginOptions.putInt(AccountManager.KEY_CALLER_UID, uidForGoogle);
         TokenRequestNotes.request(callerPkg, authTokenType, uidForGoogle, customTokens, accounts, account);""",
         1,
